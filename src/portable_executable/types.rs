@@ -1,37 +1,4 @@
-use std::fmt::{Debug, Formatter, LowerHex};
-use std::mem::size_of;
-macro_rules! read_u16{
-    ($iter : expr) => {
-        (*$iter.next()?) as u16 | ((*$iter.next()? as u16) << 8)
-    };
-}
-
-macro_rules! read_u32{
-    ($iter : expr) => {
-        (*$iter.next()?) as u32 |
-        ((*$iter.next()? as u32) << 8) |
-        ((*$iter.next()? as u32) << 16) |
-        ((*$iter.next()? as u32) << 24)
-    };
-}
-
-macro_rules! read_u64{
-    ($iter : expr) => {
-        (*$iter.next()?) as u64 |
-        ((*$iter.next()? as u64) << 8) |
-        ((*$iter.next()? as u64) << 16) |
-        ((*$iter.next()? as u64) << 24) |
-        ((*$iter.next()? as u64) << 32) |
-        ((*$iter.next()? as u64) << 40) |
-        ((*$iter.next()? as u64) << 48) |
-        ((*$iter.next()? as u64) << 56)
-    };
-}
-
-
-pub trait FromBytes where Self : Sized {
-    fn from_bytes<'a, T : Iterator<Item=&'a u8>> (iter : &mut T) -> Option<Self>;
-}
+use std::fmt::{Debug, Formatter, LowerHex, Display};
 
 #[derive(Debug)]
 pub struct DosStub {
@@ -41,17 +8,17 @@ pub struct DosStub {
 
 #[derive(Debug)]
 pub struct CoffFileHeader {
-    machine : u16,
-    number_of_sections : u16,
-    time_date_stamp : u32,
-    pointer_to_symbol_table : u32,
-    number_of_symbols : u32,
-    size_of_optional_header : u16,
-    characteristics : u16
+    pub machine : u16,
+    pub number_of_sections : u16,
+    pub time_date_stamp : u32,
+    pub pointer_to_symbol_table : u32,
+    pub number_of_symbols : u32,
+    pub size_of_optional_header : u16,
+    pub characteristics : u16
 }
 
-#[derive(Debug)]
-enum DataDirectory {
+#[derive(Debug, Copy, Clone)]
+pub enum DataDirectory {
     ExportTable = 0,
     ImportTable = 1,
     ResourceTable = 2,
@@ -101,9 +68,9 @@ pub struct ImageDataDirectory {
     pub size : u32
 }
 
-struct Hex<T>(T, usize);
+pub struct Hex<T>(pub T, pub usize);
 
-impl <T : LowerHex> Debug for Hex<T> {
+impl <T : LowerHex> Display for Hex<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self.1 {
             1 => f.write_fmt(format_args!("{:#03x}", self.0)),
@@ -116,6 +83,12 @@ impl <T : LowerHex> Debug for Hex<T> {
             8 => f.write_fmt(format_args!("{:#010x}", self.0)),
             _ => f.write_fmt(format_args!("{:#0x}", self.0))
         }
+    }
+}
+
+impl <T : LowerHex> Debug for Hex<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&self, f)
     }
 }
 
@@ -189,10 +162,10 @@ impl Debug for SectionHeader {
         f.debug_struct("SectionHeader")
             .field("name", &name)
             .field("virtual_size", &self.virtual_size)
-            .field("virtual_address", &self.virtual_address)
+            .field("virtual_address", &Hex(&self.virtual_address, 4))
             .field("size_of_raw_data", &self.size_of_raw_data)
-            .field("pointer_to_raw_data", &self.pointer_to_raw_data)
-            .field("pointer_to_relocations", &self.pointer_to_relocations)
+            .field("pointer_to_raw_data", &Hex(self.pointer_to_raw_data, 4))
+            .field("pointer_to_relocations", &Hex(self.pointer_to_relocations, 4))
             .field("pointer_to_line_numbers", &self.pointer_to_line_numbers)
             .field("number_of_relocations", &self.number_of_relocations)
             .field("number_of_line_numbers", &self.number_of_line_numbers)
@@ -201,107 +174,113 @@ impl Debug for SectionHeader {
     }
 }
 
+pub enum ImportLookupEntry {
+    Ordinal(u16), NameTableRva(u32, String)
+}
+
+impl Debug for ImportLookupEntry {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ImportLookupEntry::Ordinal(o) => f.write_fmt(format_args!("Ordinal({})", o)),
+            ImportLookupEntry::NameTableRva(rva, name) => f.debug_struct("NameTableRva")
+                .field("rva", &Hex(rva, 4)).field("name", name).finish()
+        }
+    }
+}
+
+pub struct ImportDirectoryEntry {
+    pub import_lookup_table_rva : u32,
+    pub time_date_stamp : u32,
+    pub forwarder_chain : u32,
+    pub name_rva : u32,
+    pub import_address_table_rva : u32,
+    pub import_lookup_table : Vec<ImportLookupEntry>,
+    pub name : String
+}
+
+impl Debug for ImportDirectoryEntry {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImportDirectoryEntry")
+            .field("name", &self.name)
+            .field("import_lookup_table_rva", &Hex(self.import_lookup_table_rva, 4))
+            .field("time_date_stamp", &self.time_date_stamp)
+            .field("forwarder_chain", &self.forwarder_chain)
+            .field("name_rva", &Hex(self.name_rva, 4))
+            .field("import_address_table_rva", &Hex(self.import_address_table_rva, 4))
+            .field("import_lookup_table", &self.import_lookup_table)
+            .finish()
+    }
+}
+
+
+
+#[derive(Debug)]
+pub struct ImportSection {
+    pub import_directory_table : Vec<ImportDirectoryEntry>
+}
+
+#[derive(Debug)]
+pub enum BaseRelocType {
+    ImageRelBasedAbsolute = 0,
+    ImageRelBasedHigh = 1,
+    ImageRelBasedLow = 2,
+    ImageRelBasedHighlow = 3,
+    ImageRelBasedHighadj = 4,
+    //IMAGE_REL_BASED_MIPS_JMPADDR = 5,
+    ImageRelBasedArmMov32 = 5,
+    //IMAGE_REL_BASED_RISCV_HIGH20 = 5,
+    //IMAGE_REL_BASED_RISCV_HIGH20 = 5,
+    ImageRelBasedThumbMov32 = 7,
+    //IMAGE_REL_BASED_RISCV_LOW12I = 7,
+    ImageRelBasedRiscvLow12s = 8,
+    //IMAGE_REL_BASED_LOONGARCH32_MARK_LA = 8,
+    //IMAGE_REL_BASED_LOONGARCH64_MARK_LA = 8,
+    ImageRelBasedMipsJmpaddr16 = 9,
+    ImageRelBasedDir64 = 10,
+    Unknown
+}
+
+impl BaseRelocType {
+    pub fn from(val : u16) -> BaseRelocType {
+        match (val & 0xFF00) >> 8 {
+            0 => BaseRelocType::ImageRelBasedAbsolute,
+            1 => BaseRelocType::ImageRelBasedHigh,
+            2 => BaseRelocType::ImageRelBasedLow,
+            3 => BaseRelocType::ImageRelBasedHighlow,
+            4 => BaseRelocType::ImageRelBasedHighadj,
+            5 => BaseRelocType::ImageRelBasedArmMov32,
+            7 => BaseRelocType::ImageRelBasedThumbMov32,
+            8 => BaseRelocType::ImageRelBasedRiscvLow12s,
+            9 => BaseRelocType::ImageRelBasedMipsJmpaddr16,
+            10 => BaseRelocType::ImageRelBasedDir64,
+            _ => BaseRelocType::Unknown
+        }
+    }
+}
+#[derive(Debug)]
+pub struct BaseRelocationEntry {
+    pub reloc_type : BaseRelocType,
+    pub offset : u16 // Note: only lower 12 bits are used
+}
+
+#[derive(Debug)]
+pub struct BaseRelocationBlock {
+    pub page_rva : u32,
+    pub block_size : u32,
+    pub entries : Vec<BaseRelocationEntry>
+}
+
 #[derive(Debug)]
 pub struct PortableExecutable {
     pub dos_stub : DosStub,
     pub coff_file_header : CoffFileHeader,
     pub optional_header : Option<OptionalHeader>,
-    pub section_table : Vec<SectionHeader>
-}
-
-impl FromBytes for SectionHeader {
-    fn from_bytes<'a, T: Iterator<Item=&'a u8>>(iter: &mut T) -> Option<Self> {
-         Some(SectionHeader {
-            name : read_u64!(iter),
-            virtual_size : read_u32!(iter),
-            virtual_address : read_u32!(iter),
-            size_of_raw_data : read_u32!(iter),
-            pointer_to_raw_data : read_u32!(iter),
-            pointer_to_relocations : read_u32!(iter),
-            pointer_to_line_numbers : read_u32!(iter),
-            number_of_relocations : read_u16!(iter),
-            number_of_line_numbers : read_u16!(iter),
-            characteristics : read_u32!(iter)
-        })
-    }
-}
-
-impl FromBytes for OptionalHeader {
-    fn from_bytes<'a, T: Iterator<Item=&'a u8>>(iter: &mut T) -> Option<Self> {
-        let magic = read_u16!(iter);
-        if magic != 0x10b && magic != 0x20b {
-            return None;
-        }
-        let mut optional_header = OptionalHeader {
-            magic,
-            major_linker_version : *iter.next()?,
-            minor_linker_version : *iter.next()?,
-            size_of_code : read_u32!(iter),
-            size_of_initialized_data : read_u32!(iter),
-            size_of_uninitialized_data : read_u32!(iter),
-            address_of_entry_point : read_u32!(iter),
-            base_of_code : read_u32!(iter),
-            base_of_data : if magic == 0x10b {Some(read_u32!(iter))} else {None},
-
-            image_base: if magic == 0x10b {read_u32!(iter) as u64} else {read_u64!(iter)},
-            section_alignment : read_u32!(iter),
-            file_alignment : read_u32!(iter),
-            major_os_version : read_u16!(iter),
-            minor_os_version : read_u16!(iter),
-            major_image_version : read_u16!(iter),
-            minor_image_version : read_u16!(iter),
-            major_subsystem_version : read_u16!(iter),
-            minor_subsystem_version : read_u16!(iter),
-            win_32_version_value : read_u32!(iter),
-            size_of_image : read_u32!(iter),
-            size_of_headers : read_u32!(iter),
-            check_sum : read_u32!(iter),
-            subsystem : read_u16!(iter),
-            dll_characteristics : read_u16!(iter),
-            size_of_stack_reserve : if magic == 0x10b {read_u32!(iter) as u64} else {read_u64!(iter)},
-            size_of_stack_commit : if magic == 0x10b {read_u32!(iter) as u64} else {read_u64!(iter)},
-            size_of_heap_reserve : if magic == 0x10b {read_u32!(iter) as u64} else {read_u64!(iter)},
-            size_of_heap_commit : if magic == 0x10b {read_u32!(iter) as u64} else {read_u64!(iter)},
-            loader_flags : read_u32!(iter),
-            number_of_rva_and_sizes : read_u32!(iter),
-
-            data_directories : Vec::new()
-        };
-        for i in 0..optional_header.number_of_rva_and_sizes {
-            optional_header.data_directories.push(ImageDataDirectory {
-                name : i,
-                virtual_address : read_u32!(iter),
-                size : read_u32!(iter)
-            });
-        }
-        Some(optional_header)
-    }
-}
-
-impl FromBytes for DosStub {
-    fn from_bytes<'a, T : Iterator<Item=&'a u8>> (iter : &mut T) -> Option<DosStub> {
-        let mut iter = iter.skip(0x3c);
-        let offset = read_u32!(iter);
-        Some(DosStub {
-            offset
-        })
-    }
+    pub section_table : Vec<SectionHeader>,
+    pub import_section : Option<ImportSection>,
+    pub reloc_section : Option<Vec<BaseRelocationBlock>>
 }
 
 
-impl FromBytes for CoffFileHeader {
-    fn from_bytes<'a, T: Iterator<Item=&'a u8>>(iter: &mut T) -> Option<Self> {
-        Some(CoffFileHeader {
-            machine : read_u16!(iter),
-            number_of_sections : read_u16!(iter),
-            time_date_stamp : read_u32!(iter),
-            pointer_to_symbol_table : read_u32!(iter),
-            number_of_symbols : read_u32!(iter),
-            size_of_optional_header : read_u16!(iter),
-            characteristics : read_u16!(iter)
-        })
-    }
-}
 /*
 impl CoffFileHeader {
     fn x64_64bit(sections : u16, optional_header_size : u16) -> CoffFileHeader {
@@ -320,29 +299,10 @@ impl CoffFileHeader {
 
 
 
-impl FromBytes for PortableExecutable {
-    fn from_bytes<'a, T: Iterator<Item=&'a u8>>(iter: &mut T) -> Option<Self> {
-        let dos_stub = DosStub::from_bytes(&mut iter.by_ref().take(64))?;
-        iter.by_ref().take(dos_stub.offset as usize - 64).for_each(drop);
-        if *iter.next()? != 0x50 || *iter.next()? != 0x45 || *iter.next()? != 0x00 || *iter.next()? != 0x00 {
-            return None;
-        }
-        let coff_file_header = CoffFileHeader::from_bytes(iter)?;
-        let optional_header = if coff_file_header.size_of_optional_header == 0 {None} else {
-            Some(OptionalHeader::from_bytes(iter)?)
-        };
-        let mut section_table = Vec::with_capacity(coff_file_header.number_of_sections as usize);
-        for _ in 0..coff_file_header.number_of_sections {
-            section_table.push(SectionHeader::from_bytes(&mut iter.by_ref().take(40))?);
-        }
-        Some(PortableExecutable {
-            dos_stub, coff_file_header, optional_header, section_table
-        })
-    }
-}
 
 
 
+/*
 impl Into<Vec<u8>> for &DosStub {
     fn into(self) ->  Vec<u8> {
          vec![
@@ -399,4 +359,4 @@ impl Into<Vec<u8>> for PortableExecutable {
             .chain(coff_header.into_iter())
             .collect();
     }
-}
+}*/
