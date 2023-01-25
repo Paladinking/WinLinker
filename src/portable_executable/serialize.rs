@@ -146,7 +146,7 @@ impl FromBytes for CoffFileHeader {
 
 fn to_raw_address(sections : &Vec<SectionHeader>, virtual_address : u32) -> Option<usize> {
     for sec in sections {
-        if sec.virtual_address < virtual_address && sec.virtual_address + sec.virtual_size > virtual_address {
+        if sec.virtual_address <= virtual_address && sec.virtual_address + sec.virtual_size > virtual_address {
             return Some((virtual_address - sec.virtual_address + sec.pointer_to_raw_data) as usize);
         }
     }
@@ -248,6 +248,7 @@ fn read_reloc_section(bytes : &[u8], optional_header : &OptionalHeader, section_
         let iter = &mut remaining.iter();
         let rva = read_u32!(iter);
         let size = read_u32!(iter);
+        println!("{}, {}", Hex(rva, 4), size);
         let entries = (4..(size + 4)).map(|index| {
             let val = remaining[index as usize] as u16 + ((remaining[index as usize] as u16) << 8);
             BaseRelocationEntry {

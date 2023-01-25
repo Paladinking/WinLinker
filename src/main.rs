@@ -24,5 +24,6 @@ fn main() -> Result<()> {
         println!("{:?}, {:?}", sh, characteristics::get_all(&SectionHeader::CHARACTERISTICS, sh.characteristics));
     }
     println!("{:?}", h.import_section);
+    println!("{:?}", h.reloc_section);
     Ok(())
 }
