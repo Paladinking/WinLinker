@@ -248,12 +248,15 @@ fn read_reloc_section(bytes : &[u8], optional_header : &OptionalHeader, section_
         let iter = &mut remaining.iter();
         let rva = read_u32!(iter);
         let size = read_u32!(iter);
-        println!("{}, {}", Hex(rva, 4), size);
-        let entries = (4..(size + 4)).map(|index| {
-            let val = remaining[index as usize] as u16 + ((remaining[index as usize] as u16) << 8);
-            BaseRelocationEntry {
-                reloc_type: BaseRelocType::from(val),
-                offset: val & 0x0FFF
+        let entries = (8..size).step_by(2).map_while(|index| {
+            let val = remaining[index as usize] as u16 + ((remaining[index as usize + 1] as u16) << 8);
+            if val == 0 {
+                None
+            } else {
+                Some(BaseRelocationEntry {
+                    reloc_type: BaseRelocType::from(val),
+                    offset: val & 0x0FFF
+                })
             }
         }).collect();
         base_reloc_blocks.push(BaseRelocationBlock {
@@ -261,7 +264,7 @@ fn read_reloc_section(bytes : &[u8], optional_header : &OptionalHeader, section_
             block_size : size,
             entries
         });
-        i += size as usize;//TODO Fix 32-bit align?
+        i += size as usize;
     }
     Some(base_reloc_blocks) 
 }

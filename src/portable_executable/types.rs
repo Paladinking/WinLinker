@@ -242,7 +242,7 @@ pub enum BaseRelocType {
 
 impl BaseRelocType {
     pub fn from(val : u16) -> BaseRelocType {
-        match (val & 0xFF00) >> 8 {
+        match (val & 0xF000) >> 12 {
             0 => BaseRelocType::ImageRelBasedAbsolute,
             1 => BaseRelocType::ImageRelBasedHigh,
             2 => BaseRelocType::ImageRelBasedLow,
@@ -263,11 +263,20 @@ pub struct BaseRelocationEntry {
     pub offset : u16 // Note: only lower 12 bits are used
 }
 
-#[derive(Debug)]
+
 pub struct BaseRelocationBlock {
     pub page_rva : u32,
     pub block_size : u32,
     pub entries : Vec<BaseRelocationEntry>
+}
+
+impl Debug for BaseRelocationBlock {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BaseRelocationBlock")
+            .field("page_rva", &Hex(self.page_rva, 4))
+            .field("block_size", &self.block_size)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug)]

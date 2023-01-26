@@ -24,6 +24,10 @@ fn main() -> Result<()> {
         println!("{:?}, {:?}", sh, characteristics::get_all(&SectionHeader::CHARACTERISTICS, sh.characteristics));
     }
     println!("{:?}", h.import_section);
-    println!("{:?}", h.reloc_section);
+    if let Some(reloc_blocks) = h.reloc_section {
+        for block in reloc_blocks {
+            println!("{:?}", block);
+        }
+    }
     Ok(())
 }
