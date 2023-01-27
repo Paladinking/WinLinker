@@ -12,48 +12,34 @@ macro_rules! read_u8 {
     };
 }
 
-macro_rules! read_u16{
+macro_rules! read_u16 {
     ($iter : expr) => {
-        if let Some(&b1) = $iter.next() {
-            if let Some(&b2) = $iter.next() {
-                Ok((b1 as u16) | ((b2 as u16) << 8))
-            } else {
-                Err(ParseError::OutOfDataError)
-            }
-        } else {
-            Err(ParseError::OutOfDataError)
+        match ($iter.next(), $iter.next()) {
+            (Some(&b1), Some(&b2)) => Ok(b1 as u16 | ((b2 as u16) << 8)),
+            _ => Err(ParseError::OutOfDataError)
         }
     };
 }
 
-macro_rules! read_u32{
+macro_rules! read_u32 {
     ($iter : expr) => {
-        match read_u16! ($iter) {
-            Ok(b1) => {
-                match read_u16! ($iter) {
-                    Ok(b2) => {
-                        Ok((b1 as u32) | ((b2 as u32) << 16))
-                    },
-                    Err(e) => Err(e)
-                }
-            },
-            Err(e) => Err(e)
+        match ($iter.next(), $iter.next(), $iter.next(), $iter.next()) {
+            (Some(&b1), Some(&b2), Some(&b3), Some(&b4)) =>
+                Ok(b1 as u32 | ((b2 as u32) << 8) | ((b3 as u32) << 16)  | ((b4 as u32) << 24)),
+            _ => Err(ParseError::OutOfDataError)
         }
     };
 }
 
-macro_rules! read_u64{
+macro_rules! read_u64 {
     ($iter : expr) => {
-        match read_u32! ($iter) {
-            Ok(b1) => {
-                match read_u32! ($iter) {
-                    Ok(b2) => {
-                        Ok((b1 as u64) | ((b2 as u64) << 32))
-                    },
-                    Err(e) => Err(e)
-                }
-            },
-            Err(e) => Err(e)
+        match ($iter.next(), $iter.next(), $iter.next(), $iter.next(), $iter.next(), $iter.next(), $iter.next(), $iter.next()) {
+            (Some(&b1), Some(&b2), Some(&b3), Some(&b4), Some(&b5), Some(&b6), Some(&b7), Some(&b8)) =>
+                Ok(
+                    b1 as u64 | ((b2 as u64) << 8) | ((b3 as u64) << 16)  | ((b4 as u64) << 24) |
+                    ((b5 as u64) << 32) | ((b6 as u64) << 40) | ((b7 as u64) << 48) | ((b8 as u64) << 56)
+                ),
+            _ => Err(ParseError::OutOfDataError)
         }
     };
 }
