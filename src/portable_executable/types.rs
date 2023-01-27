@@ -280,13 +280,53 @@ impl Debug for BaseRelocationBlock {
 }
 
 #[derive(Debug)]
+pub enum Identifier {
+    Name(String),
+    Id(u32)
+}
+
+pub struct Resource {
+   pub identifiers : Vec<Identifier>,
+   pub data_rva : u32,
+   pub code_page : u32,
+   pub data : Vec<u8>
+}
+
+impl Debug for Resource {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Resource")
+            .field("identifiers", &self.identifiers)
+            .field("data_rva", &Hex(self.data_rva, 4))
+            .field("code_page", &self.code_page)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
+pub struct ResourceDirectoryTable {
+    pub characteristics : u32,
+    pub time_date_stamp : u32,
+    pub major_version : u16,
+    pub minor_version : u16,
+    pub number_of_name_entries : u16,
+    pub number_of_id_entries : u16
+}
+
+#[derive(Debug)]
+pub struct ResourceSection {
+    resource_tables : Vec<ResourceDirectoryTable>,
+    resources : Vec<Resource>
+}
+
+#[derive(Debug)]
 pub struct PortableExecutable {
     pub dos_stub : DosStub,
     pub coff_file_header : CoffFileHeader,
     pub optional_header : Option<OptionalHeader>,
     pub section_table : Vec<SectionHeader>,
     pub import_section : Option<ImportSection>,
-    pub reloc_section : Option<Vec<BaseRelocationBlock>>
+    pub reloc_section : Option<Vec<BaseRelocationBlock>>,
+    pub resource_section : Option<ResourceSection>
 }
 
 

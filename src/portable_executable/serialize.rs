@@ -1,4 +1,6 @@
 use crate::portable_executable::types::*;
+use crate::portable_executable::types::DataDirectory::ResourceTable;
+use std::collections::HashMap;
 
 macro_rules! read_u16{
     ($iter : expr) => {
@@ -269,6 +271,38 @@ fn read_reloc_section(bytes : &[u8], optional_header : &OptionalHeader, section_
     Some(base_reloc_blocks) 
 }
 
+fn read_resource_table(bytes : &[u8], address : usize) -> Option<ResourceDirectoryTable> {
+    let iter = &mut (bytes[address..]).iter();
+    Some(ResourceDirectoryTable {
+        characteristics: read_u32!(iter),
+        time_date_stamp: read_u32!(iter),
+        major_version: read_u16!(iter),
+        minor_version: read_u16!(iter),
+        number_of_name_entries: read_u16!(iter),
+        number_of_id_entries: read_u16!(iter)
+    })
+}
+
+fn read_resource_section(bytes : &[u8], optional_header : &OptionalHeader, section_table : &Vec<SectionHeader>) -> Option<ResourceSection> {
+    let address = data_directory_address(DataDirectory::ResourceTable, &section_table, optional_header)?;
+    let mut offset = 0;
+   // let mut resources = Vec::new();
+    println!("{}", Hex(address, 4));
+    let mut resource_tables = HashMap::new();
+    let first_table = read_resource_table(bytes, address)?;
+    let mut to_visit : Vec<(usize, Vec<Identifier>, bool)> = (0..first_table.number_of_name_entries)
+        .map(|i| (i * 8, Vec::new(), true)).chain((0..first_table.number_of_id_entries).map(|i| (0, Vec::new(), false))).collect();
+    resource_tables.insert(0, first_table);
+    let mut resources = vec::new();
+    while !to_visit.is_empty() {
+
+    }
+
+    println!("{:?}", resource_tables);
+
+    None
+}
+
 impl FromBytes for PortableExecutable {
     fn from_bytes_iter<'a, T: Iterator<Item=&'a u8>>(iter: &mut T) -> Option<Self> {
         PortableExecutable::from_bytes(&iter.cloned().collect::<Vec<u8>>())
@@ -295,13 +329,14 @@ impl FromBytes for PortableExecutable {
             None
         };
         let reloc_section = if let Some(optional_header) = &optional_header {
+            read_resource_section(bytes, &optional_header, &section_table);
             read_reloc_section(bytes, &optional_header, &section_table)
         } else {
             None
         };
 
         Some(PortableExecutable {
-            dos_stub, coff_file_header, optional_header, section_table, import_section, reloc_section
+            dos_stub, coff_file_header, optional_header, section_table, import_section, reloc_section, resource_section : None
         })
     }
 }
