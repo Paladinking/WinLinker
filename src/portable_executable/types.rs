@@ -217,7 +217,45 @@ impl Debug for ImportDirectoryEntry {
 
 #[derive(Debug)]
 pub struct ImportSection {
-    pub import_directory_table : Vec<ImportDirectoryEntry>
+    pub import_directory_tables: Vec<ImportDirectoryEntry>
+}
+
+
+pub struct DelayLoadDirectoryTable {
+    pub attributes : u32,
+    pub name_rva : u32,
+    pub module_handle : u32,
+    pub import_address_table_rva : u32,
+    pub import_name_table_rva : u32,
+    pub bound_import_table_rva : u32,
+    pub unload_import_table_rva: u32,
+    pub time_stamp : u32,
+    pub import_lookup_table : Vec<ImportLookupEntry>, // Only contains NameTableRva values?
+    pub name : String
+}
+
+impl Debug for DelayLoadDirectoryTable {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DelayLoadDirectoryTable")
+            .field("name", &self.name)
+            .field("attributes", &self.attributes)
+            .field("name_rva", &Hex(self.name_rva, 4))
+            .field("module_handle", &self.module_handle)
+            .field("import_address_table_rva", &Hex(self.import_address_table_rva, 4))
+            .field("import_name_table_rva", &Hex(self.import_name_table_rva, 4))
+            .field("bound_import_table_rva", &Hex(self.bound_import_table_rva, 4))
+            .field("unload_import_table_rva", &Hex(self.unload_import_table_rva, 4))
+            .field("time_stamp", &self.time_stamp)
+            .field("import_lookup_table", &self.import_lookup_table)
+            .finish()
+    }
+}
+
+
+
+#[derive(Debug)]
+pub struct DelayImportSection {
+    pub delay_load_directory_table : Vec<DelayLoadDirectoryTable>
 }
 
 #[derive(Debug)]
@@ -327,7 +365,8 @@ pub struct PortableExecutable {
     pub section_table : Vec<SectionHeader>,
     pub import_section : Option<ImportSection>,
     pub reloc_section : Option<Vec<BaseRelocationBlock>>,
-    pub resource_section : Option<ResourceSection>
+    pub resource_section : Option<ResourceSection>,
+    pub delay_import_section : Option<DelayImportSection>
 }
 
 

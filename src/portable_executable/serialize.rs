@@ -4,11 +4,7 @@ use std::fmt::{Display, Formatter, Debug};
 
 macro_rules! read_u8 {
     ($iter : expr) => {
-        if let Some(&b1) = $iter.next() {
-            Ok(b1)
-        } else {
-            Err(ParseError::OutOfDataError)
-        }
+        $iter.next().copied().ok_or(ParseError::OutOfDataError)
     };
 }
 
@@ -78,8 +74,7 @@ pub enum ParseError {
     InvalidRVA,
     InvalidNameTableEntry,
     BadUtf16String,
-    InvalidHeader,
-    InvalidLookupTable
+    InvalidHeader
 }
 
 impl Display for ParseError {
@@ -253,6 +248,83 @@ fn read_utf16_string(bytes : &[u8], index : usize, string_len : usize) -> Result
     )
 }
 
+fn read_name_table(name_table_rva : u32, section_table : &Vec<SectionHeader>, image64 : bool, bytes : &[u8]) -> Result<Vec<ImportLookupEntry>, ParseError> {
+    let raw_address = to_raw_address(section_table, name_table_rva)?;
+    let mut i = 0;
+    let (increment, mask) = if image64 {
+        (8, 0x8000000000000000)
+    } else {
+        (4, 0x80000000)
+    };
+    let mut import_lookup_table = Vec::new();
+    loop {
+        let val = if image64 {
+            bytes_u64!(bytes, raw_address + i)?
+        } else {
+            bytes_u32!(bytes, raw_address + i)? as u64
+        };
+        if val == 0 {
+            break
+        }
+        if (val & mask) != 0 {
+            import_lookup_table.push(ImportLookupEntry::Ordinal(val as u16));
+        } else {
+            let rva = (val & 0x7fffffff) as u32;
+            let name = name_table_entry(section_table, rva + 2, bytes)?;
+            import_lookup_table.push(ImportLookupEntry::NameTableRva(rva, name));
+        }
+        i += increment;
+    }
+    Ok(import_lookup_table)
+}
+
+fn read_delay_import_section(bytes : &[u8], optional_header : &OptionalHeader, section_table : &Vec<SectionHeader>) -> Result<Option<DelayImportSection>, ParseError> {
+    let address = data_directory_address(DataDirectory::DelayImportDescriptor, &section_table, optional_header)?;
+    if address.is_none() {
+        return Ok(None)
+    }
+    let mut index = address.unwrap();
+    let mut delay_load_directory_table = Vec::new();
+    loop {
+        let remaining = bytes.get(index..(index + 40)).ok_or(ParseError::OutOfDataError)?;
+        let attributes = bytes_u32!(remaining, 0).unwrap();
+        let name_rva = bytes_u32!(remaining, 4).unwrap();
+        let module_handle = bytes_u32!(remaining, 8).unwrap();
+        let import_address_table_rva = bytes_u32!(remaining, 12).unwrap();
+        let import_name_table_rva = bytes_u32!(remaining, 16).unwrap();
+        let bound_import_table_rva = bytes_u32!(remaining, 24).unwrap();
+        let unload_import_table_rva = bytes_u32!(remaining, 32).unwrap();
+        let time_stamp = bytes_u32!(remaining, 36).unwrap();
+        if name_rva == 0 {
+            break;
+        }
+        let name = name_table_entry(&section_table, name_rva, bytes)?;
+        let import_lookup_table = read_name_table(
+            import_name_table_rva,
+            section_table,
+            optional_header.magic == 0x20b,
+            bytes
+        )?;
+        delay_load_directory_table.push(DelayLoadDirectoryTable {
+            attributes,
+            name_rva,
+            module_handle,
+            import_address_table_rva,
+            import_name_table_rva,
+            bound_import_table_rva,
+            unload_import_table_rva,
+            time_stamp,
+            import_lookup_table,
+            name
+        });
+        index += 32;
+    }
+
+    Ok(Some(DelayImportSection {
+        delay_load_directory_table
+    }))
+}
+
 fn read_import_section(bytes : &[u8], optional_header : &OptionalHeader, section_table : &Vec<SectionHeader>) -> Result<Option<ImportSection>, ParseError> {
     let address = data_directory_address(DataDirectory::ImportTable, &section_table, optional_header)?;
     if address.is_none() {
@@ -267,61 +339,26 @@ fn read_import_section(bytes : &[u8], optional_header : &OptionalHeader, section
         let forwarder_chain = read_u32!(iter)?;
         let name_rva = read_u32!(iter)?;
         let import_address_table_rva = read_u32!(iter)?;
-        if (import_lookup_table_rva | time_date_stamp | forwarder_chain | name_rva | import_address_table_rva) == 0 {
+        if import_lookup_table_rva == 0 {
             break;
         }
         let name = name_table_entry(&section_table, name_rva, bytes)?;
-        let mut ide = ImportDirectoryEntry {
+        let import_lookup_table = read_name_table(
+            import_lookup_table_rva, section_table,
+            optional_header.magic == 0x20b, bytes
+        )?;
+        import_table.push(ImportDirectoryEntry {
             import_lookup_table_rva,
             time_date_stamp,
             forwarder_chain,
             name_rva,
             import_address_table_rva,
-            import_lookup_table: Vec::new(),
+            import_lookup_table,
             name
-        };
-        if ide.time_date_stamp == 0 &&
-            ide.forwarder_chain == 0 &&
-            ide.import_address_table_rva == 0 &&
-            ide.import_lookup_table_rva == 0 &&
-            ide.name_rva == 0
-        {
-            break;
-        }
-        let lookup_bytes : &[u8] = &bytes[(to_raw_address(&section_table, ide.import_lookup_table_rva)?)..];
-        let mut i = 0;
-        let (increment, mask) = if optional_header.magic == 0x20b {
-            (8, 0x8000000000000000)
-        } else {
-            (4, 0x80000000)
-        };
-        loop {
-            if i + increment > lookup_bytes.len() {
-                return Err(ParseError::InvalidLookupTable); // File is invalid, lookup table should be null-terminated.
-            }
-            let mut it = lookup_bytes[i..].iter();
-            let val = if optional_header.magic == 0x20b {
-                read_u64!(it)?
-            } else {
-                read_u32!(it)? as u64
-            };
-            if val == 0 {
-                break
-            }
-
-            if (val & mask) != 0 {
-                ide.import_lookup_table.push(ImportLookupEntry::Ordinal(val as u16));
-            } else {
-                let rva = (val & 0x7fffffff) as u32;
-                let name = name_table_entry(&section_table, rva + 2, bytes)?;
-                ide.import_lookup_table.push(ImportLookupEntry::NameTableRva(rva, name));
-            }
-            i += increment;
-        }
-        import_table.push(ide);
+        });
     }
     Ok(Some(ImportSection {
-        import_directory_table: import_table
+        import_directory_tables: import_table
     }))
 }
 
@@ -458,17 +495,19 @@ impl FromBytes for PortableExecutable {
         for _ in 0..coff_file_header.number_of_sections {
             section_table.push(SectionHeader::from_bytes_iter(&mut iter.by_ref().take(40))?);
         }
-        let (import_section, reloc_section, resource_section) = if let Some(optional_header) = &optional_header {
+        let (import_section, reloc_section, resource_section, delay_import_section) = if let Some(optional_header) = &optional_header {
+
             (
                 read_import_section(bytes, &optional_header, &section_table)?,
                 read_reloc_section(bytes, &optional_header, &section_table)?,
-                read_resource_section(bytes, &optional_header, &section_table)?
+                read_resource_section(bytes, &optional_header, &section_table)?,
+                read_delay_import_section(bytes, &optional_header, &section_table)?
             )
         } else {
-            (None, None, None)
+            (None, None, None, None)
         };
         Ok(PortableExecutable {
-            dos_stub, coff_file_header, optional_header, section_table, import_section, reloc_section, resource_section
+            dos_stub, coff_file_header, optional_header, section_table, import_section, reloc_section, resource_section, delay_import_section
         })
     }
 }
