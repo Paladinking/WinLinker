@@ -1,5 +1,4 @@
 use crate::portable_executable::types::*;
-use crate::portable_executable::types::DataDirectory::ResourceTable;
 use std::collections::HashMap;
 
 macro_rules! read_u16{
@@ -14,6 +13,18 @@ macro_rules! read_u32{
         ((*$iter.next()? as u32) << 8) |
         ((*$iter.next()? as u32) << 16) |
         ((*$iter.next()? as u32) << 24)
+    };
+}
+
+macro_rules! bytes_u16 {
+    ($bytes : expr, $addr : expr) => {
+        u16::from_le_bytes($bytes.get(($addr)..($addr + 2))?.try_into().ok()?)
+    };
+}
+
+macro_rules! bytes_u32 {
+    ($bytes : expr, $addr : expr) => {
+        u32::from_le_bytes($bytes.get(($addr)..($addr + 4))?.try_into().ok()?)
     };
 }
 
@@ -173,6 +184,17 @@ fn name_table_entry(sections : &Vec<SectionHeader>, rva : u32, bytes : &[u8]) ->
     String::from_utf8(escaped).ok()
 }
 
+fn read_utf16_string(bytes : &[u8], index : usize, string_len : usize) -> Option<String> {
+    if index + string_len > bytes.len() {
+        return None;
+    }
+    let iter = (index..(index + 2 * string_len)).step_by(2)
+        .map(|i| bytes[i] as u16 | ((bytes[i + 1] as u16) << 8));
+    Some(std::char::decode_utf16(iter)
+        .map_while(|r| r.ok()).collect()
+    )
+}
+
 fn read_import_section(bytes : &[u8], optional_header : &OptionalHeader, section_table : &Vec<SectionHeader>) -> Option<ImportSection> {
     let address = data_directory_address(DataDirectory::ImportTable, &section_table, optional_header)?;
     let mut import_table = Vec::new();
@@ -285,22 +307,59 @@ fn read_resource_table(bytes : &[u8], address : usize) -> Option<ResourceDirecto
 
 fn read_resource_section(bytes : &[u8], optional_header : &OptionalHeader, section_table : &Vec<SectionHeader>) -> Option<ResourceSection> {
     let address = data_directory_address(DataDirectory::ResourceTable, &section_table, optional_header)?;
-    let mut offset = 0;
-   // let mut resources = Vec::new();
-    println!("{}", Hex(address, 4));
-    let mut resource_tables = HashMap::new();
+    let mut resource_tables : HashMap<u32, ResourceDirectoryTable> = HashMap::new();
     let first_table = read_resource_table(bytes, address)?;
-    let mut to_visit : Vec<(usize, Vec<Identifier>, bool)> = (0..first_table.number_of_name_entries)
-        .map(|i| (i * 8, Vec::new(), true)).chain((0..first_table.number_of_id_entries).map(|i| (0, Vec::new(), false))).collect();
+    let mut to_visit : Vec<(u32, u16, Vec<Identifier>, bool)> = (0..first_table.number_of_name_entries)
+        .map(|i| (0, i * 8, Vec::new(), true))
+        .chain((0..first_table.number_of_id_entries)
+            .map(|i| (0, (first_table.number_of_name_entries + i) * 8, Vec::new(), false))
+        ).collect();
     resource_tables.insert(0, first_table);
-    let mut resources = vec::new();
+    let mut resources = Vec::new();
     while !to_visit.is_empty() {
-
+        let (table, i, mut entries, by_name) = to_visit.pop()?;
+        let index = address + table as usize + 16 + i as usize;
+        let val = bytes_u32!(bytes, index) as usize;
+        if by_name {
+            let string_addr = address + val & 0x7fffffff;
+            let string_len = bytes_u16!(bytes, string_addr) as usize;
+            let entry = read_utf16_string(bytes, string_addr + 2, string_len)?;
+            entries.push(Identifier::Name(entry));
+        } else {
+            entries.push(Identifier::Id(val as u32))
+        }
+        let next = u32::from_le_bytes(bytes[(index + 4)..(index + 8)].try_into().ok()?);
+        if (next & 0x80000000) != 0 {
+            let next = next & 0x7fffffff;
+            if !resource_tables.contains_key(&next) {
+                let new_table = read_resource_table(bytes, address + next as usize)?;
+                let iter = (0..new_table.number_of_name_entries)
+                    .map(|i| (next, i * 8, entries.clone(), true))
+                    .chain((0..new_table.number_of_id_entries)
+                        .map(|i| (next, (new_table.number_of_name_entries + i) * 8, entries.clone(), false))
+                    );
+                for e in iter {
+                    to_visit.push(e);
+                }
+                resource_tables.insert(next, new_table);
+            }
+        } else {
+            let addr = address + next as usize;
+            let data_rva = bytes_u32!(bytes, addr);
+            let size = bytes_u32!(bytes, addr + 4);
+            let code_page = bytes_u32!(bytes, addr + 8);
+            let data_addr = to_raw_address(section_table, data_rva)?;
+            let data = Vec::from(&bytes[data_addr..(data_addr + size as usize)]);
+            let resource = Resource {
+                identifiers: entries,
+                data_rva,
+                code_page,
+                data
+            };
+            resources.push(resource);
+        }
     }
-
-    println!("{:?}", resource_tables);
-
-    None
+    Some(ResourceSection { resource_tables, resources })
 }
 
 impl FromBytes for PortableExecutable {
@@ -323,20 +382,17 @@ impl FromBytes for PortableExecutable {
         for _ in 0..coff_file_header.number_of_sections {
             section_table.push(SectionHeader::from_bytes_iter(&mut iter.by_ref().take(40))?);
         }
-        let import_section = if let Some(optional_header) = &optional_header {
-            read_import_section(bytes, &optional_header, &section_table)
+        let (import_section, reloc_section, resource_section) = if let Some(optional_header) = &optional_header {
+            (
+                read_import_section(bytes, &optional_header, &section_table),
+                read_reloc_section(bytes, &optional_header, &section_table),
+                read_resource_section(bytes, &optional_header, &section_table)
+            )
         } else {
-            None
+            (None, None, None)
         };
-        let reloc_section = if let Some(optional_header) = &optional_header {
-            read_resource_section(bytes, &optional_header, &section_table);
-            read_reloc_section(bytes, &optional_header, &section_table)
-        } else {
-            None
-        };
-
         Some(PortableExecutable {
-            dos_stub, coff_file_header, optional_header, section_table, import_section, reloc_section, resource_section : None
+            dos_stub, coff_file_header, optional_header, section_table, import_section, reloc_section, resource_section
         })
     }
 }

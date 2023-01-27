@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt::{Debug, Formatter, LowerHex, Display};
 
 #[derive(Debug)]
@@ -279,7 +280,7 @@ impl Debug for BaseRelocationBlock {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Identifier {
     Name(String),
     Id(u32)
@@ -314,8 +315,8 @@ pub struct ResourceDirectoryTable {
 
 #[derive(Debug)]
 pub struct ResourceSection {
-    resource_tables : Vec<ResourceDirectoryTable>,
-    resources : Vec<Resource>
+    pub resource_tables : HashMap<u32, ResourceDirectoryTable>,
+    pub resources : Vec<Resource>
 }
 
 #[derive(Debug)]
