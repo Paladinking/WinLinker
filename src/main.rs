@@ -10,7 +10,7 @@ use portable_executable::characteristics;
 mod portable_executable;
 
 fn main() -> Result<()> {
-    let data = std::fs::read("msedge.exe")?;
+    let data = std::fs::read("grapple.exe")?;
     let header = PortableExecutable::from_bytes_iter(&mut data.iter());
 
     let h = header.unwrap();
@@ -31,5 +31,6 @@ fn main() -> Result<()> {
             println!("{:?}", block);
         }
     }
+    println!("{:?}", h.export_section.unwrap());
     Ok(())
 }

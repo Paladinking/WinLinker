@@ -210,6 +210,40 @@ impl FromBytes for CoffFileHeader {
     }
 }
 
+impl FromBytes for ExportDirectoryTable {
+    fn from_bytes_iter<'a, T: Iterator<Item=&'a u8>>(iter: &mut T) -> Result<Self, ParseError> {
+        Ok(ExportDirectoryTable {
+            export_flags: read_u32!(iter)?,
+            time_date_stamp: read_u32!(iter)?,
+            major_version: read_u16!(iter)?,
+            minor_version: read_u16!(iter)?,
+            name_rva: read_u32!(iter)?,
+            ordinal_base: read_u32!(iter)?,
+            address_table_entries: read_u32!(iter)?,
+            number_of_name_pointers: read_u32!(iter)?,
+            export_address_table_rva: read_u32!(iter)?,
+            name_pointer_rva: read_u32!(iter)?,
+            ordinal_table_rva: read_u32!(iter)?
+        })
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
+        Ok(ExportDirectoryTable {
+            export_flags: bytes_u32!(bytes, 0)?,
+            time_date_stamp: bytes_u32!(bytes, 4)?,
+            major_version: bytes_u16!(bytes, 8)?,
+            minor_version: bytes_u16!(bytes, 10)?,
+            name_rva: bytes_u32!(bytes, 12)?,
+            ordinal_base: bytes_u32!(bytes, 16)?,
+            address_table_entries: bytes_u32!(bytes, 20)?,
+            number_of_name_pointers: bytes_u32!(bytes, 24)?,
+            export_address_table_rva: bytes_u32!(bytes, 28)?,
+            name_pointer_rva: bytes_u32!(bytes, 32)?,
+            ordinal_table_rva: bytes_u32!(bytes, 36)?
+        })
+    }
+}
+
 fn to_raw_address(sections : &Vec<SectionHeader>, virtual_address : u32) -> Result<usize, ParseError> {
     for sec in sections {
         if sec.virtual_address <= virtual_address && sec.virtual_address + sec.virtual_size > virtual_address {
@@ -278,44 +312,83 @@ fn read_name_table(name_table_rva : u32, section_table : &Vec<SectionHeader>, im
     Ok(import_lookup_table)
 }
 
+fn read_export_section(bytes : &[u8], optional_header : &OptionalHeader, section_table : &Vec<SectionHeader>) -> Result<Option<ExportSection>, ParseError> {
+    let address = data_directory_address(DataDirectory::ExportTable, section_table, optional_header)?;
+    if address.is_none() {
+        return Ok(None)
+    }
+    let address = address.unwrap();
+    let virtual_address = optional_header.data_directories[DataDirectory::ExportTable as usize].virtual_address;
+    let size = optional_header.data_directories[DataDirectory::ExportTable as usize].size;
+    let export_directory_table = ExportDirectoryTable::from_bytes(&bytes[address..(address + 40)])?;
+
+    let mut export_address_table = Vec::new();
+    let mut export_name_table = Vec::new();
+
+    let exp_table_addr = to_raw_address(section_table, export_directory_table.export_address_table_rva)?;
+
+    for index in 0..(export_directory_table.address_table_entries as usize) {
+        let rva = bytes_u32!(bytes, exp_table_addr + index * 4)?;
+        if rva >= virtual_address && rva < virtual_address + size {
+            let name = name_table_entry(section_table, rva, bytes)?;
+            export_address_table.push(ExportAddressEntry::ForwarderRVA(rva, name));
+        } else {
+            export_address_table.push(ExportAddressEntry::ExportRVA(rva));
+        }
+    }
+
+    let name_base = to_raw_address(section_table, export_directory_table.name_pointer_rva)?;
+    let ordinal_base = to_raw_address(section_table, export_directory_table.ordinal_table_rva)?;
+    println!("Test");
+    for index in 0..(export_directory_table.number_of_name_pointers as usize) {
+        let rva = bytes_u32!(bytes, name_base + index * 4)?;
+        let ordinal = bytes_u16!(bytes, ordinal_base + index * 2)?;
+        let name = name_table_entry(section_table, rva, bytes)?;
+        export_name_table.push(ExportNameTableEntry {
+            rva, name, ordinal
+        });
+    }
+
+    let name = name_table_entry(section_table,  export_directory_table.name_rva ,bytes)?;
+
+    Ok(Some(ExportSection {
+        name,
+        export_directory_table,
+        export_address_table,
+        export_name_table
+    }))
+}
+
 fn read_delay_import_section(bytes : &[u8], optional_header : &OptionalHeader, section_table : &Vec<SectionHeader>) -> Result<Option<DelayImportSection>, ParseError> {
-    let address = data_directory_address(DataDirectory::DelayImportDescriptor, &section_table, optional_header)?;
+    let address = data_directory_address(DataDirectory::DelayImportDescriptor, section_table, optional_header)?;
     if address.is_none() {
         return Ok(None)
     }
     let mut index = address.unwrap();
     let mut delay_load_directory_table = Vec::new();
     loop {
-        let remaining = bytes.get(index..(index + 40)).ok_or(ParseError::OutOfDataError)?;
-        let attributes = bytes_u32!(remaining, 0).unwrap();
+        let remaining = bytes.get(index..(index + 32)).ok_or(ParseError::OutOfDataError)?;
         let name_rva = bytes_u32!(remaining, 4).unwrap();
-        let module_handle = bytes_u32!(remaining, 8).unwrap();
-        let import_address_table_rva = bytes_u32!(remaining, 12).unwrap();
         let import_name_table_rva = bytes_u32!(remaining, 16).unwrap();
-        let bound_import_table_rva = bytes_u32!(remaining, 24).unwrap();
-        let unload_import_table_rva = bytes_u32!(remaining, 32).unwrap();
-        let time_stamp = bytes_u32!(remaining, 36).unwrap();
         if name_rva == 0 {
             break;
         }
-        let name = name_table_entry(&section_table, name_rva, bytes)?;
-        let import_lookup_table = read_name_table(
-            import_name_table_rva,
-            section_table,
-            optional_header.magic == 0x20b,
-            bytes
-        )?;
         delay_load_directory_table.push(DelayLoadDirectoryTable {
-            attributes,
+            attributes : bytes_u32!(remaining, 0).unwrap(),
             name_rva,
-            module_handle,
-            import_address_table_rva,
+            module_handle : bytes_u32!(remaining, 8).unwrap(),
+            import_address_table_rva : bytes_u32!(remaining, 12).unwrap(),
             import_name_table_rva,
-            bound_import_table_rva,
-            unload_import_table_rva,
-            time_stamp,
-            import_lookup_table,
-            name
+            bound_import_table_rva : bytes_u32!(remaining, 20).unwrap(),
+            unload_import_table_rva : bytes_u32!(remaining, 24).unwrap(),
+            time_stamp : bytes_u32!(remaining, 28).unwrap(),
+            import_lookup_table : read_name_table(
+                import_name_table_rva,
+                section_table,
+                optional_header.magic == 0x20b,
+                bytes
+            )?,
+            name : name_table_entry(&section_table, name_rva, bytes)?
         });
         index += 32;
     }
@@ -326,7 +399,7 @@ fn read_delay_import_section(bytes : &[u8], optional_header : &OptionalHeader, s
 }
 
 fn read_import_section(bytes : &[u8], optional_header : &OptionalHeader, section_table : &Vec<SectionHeader>) -> Result<Option<ImportSection>, ParseError> {
-    let address = data_directory_address(DataDirectory::ImportTable, &section_table, optional_header)?;
+    let address = data_directory_address(DataDirectory::ImportTable, section_table, optional_header)?;
     if address.is_none() {
         return Ok(None);
     }
@@ -363,7 +436,7 @@ fn read_import_section(bytes : &[u8], optional_header : &OptionalHeader, section
 }
 
 fn read_reloc_section(bytes : &[u8], optional_header : &OptionalHeader, section_table : &Vec<SectionHeader>) -> Result<Option<Vec<BaseRelocationBlock>>, ParseError> {
-    let address = data_directory_address(DataDirectory::BaseRelocationTable, &section_table, optional_header)?;
+    let address = data_directory_address(DataDirectory::BaseRelocationTable, section_table, optional_header)?;
     if address.is_none() {
         return Ok(None);
     }
@@ -415,7 +488,7 @@ fn read_resource_table(bytes : &[u8], address : usize) -> Result<ResourceDirecto
 }
 
 fn read_resource_section(bytes : &[u8], optional_header : &OptionalHeader, section_table : &Vec<SectionHeader>) -> Result<Option<ResourceSection>, ParseError> {
-    let address = data_directory_address(DataDirectory::ResourceTable, &section_table, optional_header)?;
+    let address = data_directory_address(DataDirectory::ResourceTable, section_table, optional_header)?;
     if address.is_none() {
         return Ok(None);
     }
@@ -495,19 +568,20 @@ impl FromBytes for PortableExecutable {
         for _ in 0..coff_file_header.number_of_sections {
             section_table.push(SectionHeader::from_bytes_iter(&mut iter.by_ref().take(40))?);
         }
-        let (import_section, reloc_section, resource_section, delay_import_section) = if let Some(optional_header) = &optional_header {
+        let (import_section, reloc_section, resource_section, delay_import_section, export_section) = if let Some(optional_header) = &optional_header {
 
             (
                 read_import_section(bytes, &optional_header, &section_table)?,
                 read_reloc_section(bytes, &optional_header, &section_table)?,
                 read_resource_section(bytes, &optional_header, &section_table)?,
-                read_delay_import_section(bytes, &optional_header, &section_table)?
+                read_delay_import_section(bytes, &optional_header, &section_table)?,
+                read_export_section(bytes, &optional_header, &section_table)?
             )
         } else {
-            (None, None, None, None)
+            (None, None, None, None, None)
         };
         Ok(PortableExecutable {
-            dos_stub, coff_file_header, optional_header, section_table, import_section, reloc_section, resource_section, delay_import_section
+            dos_stub, coff_file_header, optional_header, section_table, import_section, reloc_section, resource_section, delay_import_section, export_section
         })
     }
 }

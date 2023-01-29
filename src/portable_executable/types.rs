@@ -258,6 +258,81 @@ pub struct DelayImportSection {
     pub delay_load_directory_table : Vec<DelayLoadDirectoryTable>
 }
 
+pub enum ExportAddressEntry {
+    ExportRVA(u32), ForwarderRVA(u32, String)
+}
+
+impl Debug for ExportAddressEntry {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExportAddressEntry::ExportRVA(rva) => {
+                f.debug_tuple("ExportRVA")
+                    .field(&Hex(rva, 4)).finish()
+            }
+            ExportAddressEntry::ForwarderRVA(rva, name) => {
+                f.debug_tuple("ForwarderRVA")
+                    .field(&Hex(rva, 4)).field(name).finish()
+            }
+        }
+    }
+}
+
+pub struct ExportDirectoryTable {
+    pub export_flags: u32,
+    pub time_date_stamp : u32,
+    pub major_version : u16,
+    pub minor_version : u16,
+    pub name_rva : u32,
+    pub ordinal_base : u32,
+    pub address_table_entries : u32,
+    pub number_of_name_pointers : u32,
+    pub export_address_table_rva: u32,
+    pub name_pointer_rva : u32,
+    pub ordinal_table_rva : u32
+}
+
+impl Debug for ExportDirectoryTable {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExportDirectoryTable")
+            .field("export_flags", &self.export_flags)
+            .field("time_date_stamp", &self.time_date_stamp)
+            .field("major_version", &self.major_version)
+            .field("minor_version", &self.major_version)
+            .field("name_rva", &Hex(self.name_rva, 4))
+            .field("ordinal_base", &self.ordinal_base)
+            .field("address_table_entries", &self.address_table_entries)
+            .field("number_of_name_pointers", &self.number_of_name_pointers)
+            .field("export_address_table_rva", &Hex(self.export_address_table_rva, 4))
+            .field("name_pointer_rva", &Hex(self.name_pointer_rva, 4))
+            .field("ordinal_table_rva", &Hex(self.ordinal_table_rva, 4))
+            .finish()
+    }
+}
+
+pub struct ExportNameTableEntry {
+    pub rva : u32,
+    pub name : String,
+    pub ordinal:  u16 //To get real index in export_address_table, subtract ExportDirectoryTable::ordinal_base first.
+}
+
+impl Debug for ExportNameTableEntry {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExportNameTableEntry")
+            .field("rva", &Hex(self.rva, 4))
+            .field("name", &self.name)
+            .field("ordinal", &self.ordinal)
+            .finish()
+    }
+}
+
+#[derive(Debug)]
+pub struct ExportSection {
+    pub name : String,
+    pub export_directory_table : ExportDirectoryTable,
+    pub export_address_table : Vec<ExportAddressEntry>,
+    pub export_name_table : Vec<ExportNameTableEntry>
+}
+
 #[derive(Debug)]
 pub enum BaseRelocType {
     ImageRelBasedAbsolute = 0,
@@ -366,7 +441,8 @@ pub struct PortableExecutable {
     pub import_section : Option<ImportSection>,
     pub reloc_section : Option<Vec<BaseRelocationBlock>>,
     pub resource_section : Option<ResourceSection>,
-    pub delay_import_section : Option<DelayImportSection>
+    pub delay_import_section : Option<DelayImportSection>,
+    pub export_section : Option<ExportSection>
 }
 
 
