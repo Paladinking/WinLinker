@@ -1,0 +1,26 @@
+arithmetic_operator : ('+' | '-' | '*' | '/')
+comparison_operator : ('==' | '!=' | '>=' '<=' | '>' | '<')
+boolean_operator : ('&&' | '||')
+bitwise_operator : ('|' | '&' | '^' | '>>' | '<<')
+dual_operator : (arithmetic_operator | comparison_operator | boolean_operator | bitwise_operator)
+single_operator : ('!')
+type : ('bool' | 's32' | 'u32') -- No floats yet.
+int_literal : ('0'..'9' | '0'..'9' + number)
+bool_literal : ('true' | 'false')
+float_literal : (int_literal + '.' + int_literal) -- NOT YET
+character : ('a'..'z' | '_' | 'A'..'Z')
+alpha_numeric : (character | '0'..'9')
+string : (alpha_numeric | alpha_numeric + string)
+string_literal : ('" + string + '"') -- NOT YET
+any_literal : (int_literal | bool_literal) -- No string_literal or float_literal yet.
+name : (character | character + string)
+new_line : ('\n' | '\r')
+space : (new_line | ' ' | '\t' | '' | ' ' + space | '\t' + space | new_line + space)
+expression : (any_literal | name | single_operator + space + expression | expression + space + dual_operator + space + expression)
+assignment : (name + space + '=' + space + expression)
+statement : (assignment + space + ';')
+statements : (space | space + statement + statements)
+definition : (type + space + name + space + ';')
+definitions : (space | space + definition + definitions)
+program : (definitions + 'start' + statements)
+

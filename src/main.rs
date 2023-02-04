@@ -1,5 +1,3 @@
-extern crate core;
-
 use std::io::Result;
 
 use portable_executable::types::PortableExecutable;
@@ -8,9 +6,12 @@ use portable_executable::types::{CoffFileHeader, SectionHeader};
 use portable_executable::characteristics;
 
 mod portable_executable;
+mod language;
 
 fn main() -> Result<()> {
-    let data = std::fs::read("grapple.exe")?;
+    language::parser::read_program(String::from(""));
+    /*
+    let data = std::fs::read("main.exe")?;
     let header = PortableExecutable::from_bytes_iter(&mut data.iter());
 
     let h = header.unwrap();
@@ -31,6 +32,6 @@ fn main() -> Result<()> {
             println!("{:?}", block);
         }
     }
-    println!("{:?}", h.export_section.unwrap());
+    println!("{:?}", h.export_section.unwrap());*/
     Ok(())
 }

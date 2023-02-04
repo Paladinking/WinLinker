@@ -21,13 +21,8 @@ pub enum CoffHeaderCharacteristic {
     ImageFileBytesReversedHi = 0x8000,
 }
 
-impl Into<u16> for CoffHeaderCharacteristic {
-    fn into(self) -> u16 {
-        self as u16
-    }
-}
-
 #[derive(Debug, Copy, Clone)]
+#[allow(dead_code)]
 pub enum SectionHeaderCharacteristic {
     ImageScnTypeNoPad = 0x00000008,
     ImageScnCntCode = 0x00000020,
@@ -64,6 +59,12 @@ pub enum SectionHeaderCharacteristic {
     ImageScnMemExecute = 0x20000000,
     ImageScnMemRead = 0x40000000,
     ImageScnMemWrite = 0x80000000,
+}
+
+impl Into<u16> for CoffHeaderCharacteristic {
+    fn into(self) -> u16 {
+        self as u16
+    }
 }
 
 impl Into<u32> for SectionHeaderCharacteristic {

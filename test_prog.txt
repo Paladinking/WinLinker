@@ -1,0 +1,8 @@
+bool a;
+s32 b;
+u32 c;
+start
+
+c = 32 + 24 * 3 + 5 - 6;
+exit_code = c + 100;
+end
