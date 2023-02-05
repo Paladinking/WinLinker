@@ -85,3 +85,26 @@ algorithm:
                 var_1 = choose reg / mem
 
 
+struct MiniVar {
+    imm : bool,
+    creation : usize,
+    first_use : usize,
+    last_use : usize
+}
+
+enum MiniOperation {
+    Imm(u64),
+    Add {op1 : usize, op2 : usize},
+    Sub {op1 : usize, op2 : usize},
+    MulSigned {op1 : usize, op2 : usize},
+    DivSigned {op1 : usize, op2 : usize},
+    MulUnsigned {op1 : usize, op2 : usize},
+    DivUnsigned {op1: usize, op2 : usize},
+    Not {op1 : usize},
+}
+
+struct MiniStatement {
+    var : usize,
+    operation : MiniOperation,
+    dest : usize,
+}

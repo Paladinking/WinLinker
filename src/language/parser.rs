@@ -168,11 +168,11 @@ impl Display for SingleOperator{
 #[derive(Debug)]
 pub enum Expression <'a> {
     Variable(&'a Variable<'a>),
-    Operator {first : Box<Expression<'a>>, operator : DualOperator, second : Box<Expression<'a>>},
-    SingleOperator {operator : SingleOperator, expr :  Box<Expression<'a>>},
+    Operator {first : usize, operator : DualOperator, second : usize},
+    SingleOperator {operator : SingleOperator, expr :  usize},
     IntLiteral(u64),
     BoolLiteral(bool),
-    None // Used while parsing to indicate a subexpression not yet parsed
+    None
 }
 
 impl <'a> Display for Expression<'a> {
@@ -191,7 +191,7 @@ impl <'a> Display for Expression<'a> {
 }
 
 enum Statement <'a>{
-    Assignment {var : &'a Variable<'a>, expr : Expression<'a>}
+    Assignment {var : &'a Variable<'a>, expr : Vec<Expression<'a>>}
 }
 
 struct Program <'a> {
@@ -339,7 +339,7 @@ impl <'a>Parser<'a> {
         None
     }
 
-    fn parse_expression<'b>(&'b mut self) -> Result<Expression<'a>, ParseError> {
+    fn parse_expression<'b>(&'b mut self) -> Result<Vec<Expression<'a>>, ParseError> {
         self.skip_while(|c| Parser::SPACES.contains(c));
         let mut builder = ExpressionBuilder::new();
         loop {
@@ -360,16 +360,16 @@ impl <'a>Parser<'a> {
                     let int_str = self.read_until(|c| !('0'..='9').contains(&c));
                     let int = u64::from_str(int_str).map_err(|e|
                         ParseError::new(ParseErrorType::InvalidLiteral(int_str.to_owned()), self))?;
-                    expr = Box::new(Expression::IntLiteral(int));
+                    expr = Expression::IntLiteral(int);
                 },
                 _ => {
                     let word = self.read_word()?;
                     if word == "true" {
-                        expr = Box::new(Expression::BoolLiteral(true));
+                        expr = Expression::BoolLiteral(true);
                     } else if word == "false" {
-                        expr = Box::new(Expression::BoolLiteral(false));
+                        expr =Expression::BoolLiteral(false);
                     } else if let Some(&var) = self.variables.get(word) {
-                        expr = Box::new(Expression::Variable(var));
+                        expr = Expression::Variable(var);
                     } else {
                         return Err(ParseError::new(ParseErrorType::InvalidLiteral(word.to_owned()), self));
                     }
@@ -391,7 +391,7 @@ impl <'a>Parser<'a> {
         if !builder.is_complete() {
             return Err(ParseError::new(ParseErrorType::UnmatchedParen, self));
         }
-        Ok(*builder.into_expression())
+        Ok(builder.into_expression())
     }
 
     fn get_pos(&self) -> (usize, usize) {
