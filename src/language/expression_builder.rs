@@ -80,7 +80,7 @@ impl<'a> ExpressionBuilder <'a> {
         return self.open_paren.is_empty()
     }
 
-    pub(crate) fn into_expression(self) -> Vec<Expression<'a>> {
+    pub(crate) fn into_expression(self, expressions : &mut Vec<Expression<'a>>) {
         let mut res : usize = 0;
         let val = unsafe { // Root never changes, is always valid
             if (*self.root).second_child.is_null() {
@@ -88,42 +88,44 @@ impl<'a> ExpressionBuilder <'a> {
             }
             (*self.root).second_child
         };
-        let mut stack = vec![(val, &mut res as *mut _)];
-        let mut expressions = Vec::new();
-        while let Some((top,  dest)) = stack.pop() {
+        let mut stack = vec![(val, &mut res as *mut usize)];
+        while let Some((top, dest)) = stack.pop() {
             let mut top = unsafe {Box::from_raw(top)}; // Tree is valid
             match &mut top.expression_type {
                 ExpressionBuilderType::Atom(e) => {
+                    unsafe {*dest = expressions.len()};
                     expressions.push(std::mem::replace(e, Expression::None));
+                    drop(top);
                 },
                 ExpressionBuilderType::SingleOperator(s) => {
                     let mut e = Expression::SingleOperator {
                         operator: *s, expr: 0
                     };
-                    expressions.push(e);
-                    if let Expression::SingleOperator {ref mut expr , ..} = expressions.last_mut().unwrap() {
-                        stack.push((top.second_child, expr as *mut _));
-                    } else {
-                        unreachable!();
-                    }
+                    top.expression_type = ExpressionBuilderType::Atom(e);
+                    let child = match &mut top.expression_type {
+                        ExpressionBuilderType::Atom(Expression::SingleOperator {expr, ..}) =>
+                            (top.second_child, expr as *mut usize),
+                        _ => unreachable!()
+                    };
+                    stack.push((Box::into_raw(top), dest));
+                    stack.push(child);
                 },
                 ExpressionBuilderType::DualOperator(s) => {
                     let mut e = Expression::Operator {
                         operator: *s, first: 0, second : 0
                     };
-                    expressions.push(e);
-                    if let Expression::Operator {ref mut first, ref mut second, ..} = expressions.last_mut().unwrap() {
-                        stack.push((top.first_child, first as *mut _));
-                        stack.push((top.second_child, second as *mut _));
-                    } else {
-                        unreachable!();
-                    }
+                    top.expression_type = ExpressionBuilderType::Atom(e);
+                    let (first_child, second_child) = match &mut top.expression_type {
+                        ExpressionBuilderType::Atom(Expression::Operator {first, second, ..}) =>
+                            ((top.first_child, first as *mut usize), (top.second_child, second as *mut usize)),
+                        _ => unreachable!()
+                    };
+                    stack.push((Box::into_raw(top), dest));
+                    stack.push(second_child);
+                    stack.push(first_child);
                 }
             }
-            unsafe {*dest = expressions.len() - 1;}
-            drop(top);
         }
-        expressions
     }
 
     pub(crate) fn open_parentheses(&mut self) {

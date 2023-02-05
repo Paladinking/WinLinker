@@ -16,6 +16,7 @@ pub(super) enum ParseErrorType {
     BadVarName(String),
     InvalidLiteral(String),
     UnmatchedParen,
+    TypeError(String),
     EOF
 }
 
@@ -34,7 +35,8 @@ impl Display for ParseErrorType {
             ParseErrorType::EOF => f.write_str("Unexpected end of file"),
             ParseErrorType::UnmatchedParen =>
                 f.write_fmt(format_args!("Syntax Error : Unmatched parentheses")),
-
+            ParseErrorType::TypeError(s) =>
+                f.write_fmt(format_args!("Type Error : {}", s)),
             ParseErrorType::InvalidLiteral(s) =>
                 f.write_fmt(format_args!("Invalid literal : '{}'", s))
         }
@@ -62,6 +64,7 @@ impl ParseError {
                     error_type : error, pos : (row, col - len)
                 }
             },
+            ParseErrorType::TypeError(_) |
             ParseErrorType::Unknown | ParseErrorType::EOF => ParseError::new_at(
                 error, row, col
             )
@@ -90,21 +93,32 @@ impl Display for ParseError {
 
 impl Error for ParseError {}
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Type<'a> {
-    Plain {size : usize, name : &'a str}
+    S32,
+    U32,
+    Bool,
+    Plain {size : usize, name : &'a str, id : usize},
+    AnyInt,
+    Any
 }
 
-impl <'a> PartialEq for Type<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        return std::ptr::eq(self, other);
+impl <'a> Type<'a> {
+    fn matches(&self, other : &Type<'a>) -> Result<Type<'a>, ()> {
+        match (self, other) {
+            (Type::Any, t) | (t, Type::Any) => Ok(*t),
+            (Type::AnyInt, Type::S32) | (Type::S32, Type::AnyInt) => Ok(Type::S32),
+            (Type::AnyInt, Type::U32) | (Type::U32, Type::AnyInt) => Ok(Type::U32),
+            _ if self == other => Ok(*self),
+            _ => Err(())
+        }
     }
 }
 
 
 #[derive(Debug)]
 pub struct Variable <'a> {
-    var_type : &'a Type<'a>
+    var_type : Type<'a>
 }
 
 impl <'a> PartialEq for Variable<'a> {
@@ -202,15 +216,15 @@ struct Parser<'a> {
     data : &'a str,
     chars : std::str::Chars<'a>,
     arena : &'a Bump,
-    types : HashMap<String, &'a Type<'a>>,
+    types : HashMap<String, Type<'a>>,
     variables : HashMap<String, &'a Variable<'a>>
 }
 
-fn create_primitives(arena : &Bump) -> HashMap<String, &Type> {
-    let mut types : HashMap<String, &Type> = HashMap::new();
-    types.insert(String::from("bool"), arena.alloc(Type::Plain {size : 1, name : "bool"}));
-    types.insert(String::from("s32"), arena.alloc(Type::Plain {size : 4, name : "s32"}));
-    types.insert(String::from("u32"), arena.alloc(Type::Plain {size : 4, name : "u32"}));
+fn create_primitives(arena : &Bump) -> HashMap<String, Type> {
+    let mut types : HashMap<String, Type> = HashMap::new();
+    types.insert(String::from("bool"), Type::Bool);
+    types.insert(String::from("s32"), Type::S32);
+    types.insert(String::from("u32"), Type::U32);
     types
 }
 
@@ -222,7 +236,7 @@ impl <'a>Parser<'a> {
         let types = create_primitives(arena);
         let mut variables : HashMap<String, &Variable> = HashMap::new();
         variables.insert("exit_code".to_owned(), arena.alloc(Variable {
-            var_type : *types.get("u32").unwrap()
+            var_type : Type::U32
         }));
         let chars = data.chars();
         Parser {
@@ -285,7 +299,7 @@ impl <'a>Parser<'a> {
         }
     }
 
-    fn add_variable(&mut self, name : &str, t : &'a Type) -> Result<(), ParseError> {
+    fn add_variable(&mut self, name : &str, t : Type<'a>) -> Result<(), ParseError> {
         if Parser::KEYWORDS.iter().any(|&s| s == name) {
             return Err(ParseError::new(
                 ParseErrorType::BadVarName(name.to_owned()), self
@@ -339,7 +353,7 @@ impl <'a>Parser<'a> {
         None
     }
 
-    fn parse_expression<'b>(&'b mut self) -> Result<Vec<Expression<'a>>, ParseError> {
+    fn parse_expression<'b>(&'b mut self, expressions : &mut Vec<Expression<'a>>) -> Result<(), ParseError> {
         self.skip_while(|c| Parser::SPACES.contains(c));
         let mut builder = ExpressionBuilder::new();
         loop {
@@ -391,7 +405,63 @@ impl <'a>Parser<'a> {
         if !builder.is_complete() {
             return Err(ParseError::new(ParseErrorType::UnmatchedParen, self));
         }
-        Ok(builder.into_expression())
+        builder.into_expression(expressions);
+        Ok(())
+    }
+
+    pub(crate) fn type_validate(&self, statement: &Statement) -> Result<(), ParseError> {
+        let err_map = |_| ParseError::new(ParseErrorType::TypeError("Pass".to_owned()), self);
+        match statement {
+            Statement::Assignment {var,expr} => {
+                let mut target_types = Vec::with_capacity(expr.len());
+                for e in expr.iter() {
+                    println!("{:?}", e);
+                    target_types.push(match e {
+                        Expression::Variable(v) => {
+                            v.var_type
+                        }
+                        Expression::Operator { first, second, operator } => {
+                            match operator {
+                                DualOperator::Divide | DualOperator::Multiply |
+                                DualOperator::Minus | DualOperator::Plus => {
+                                    println!("{:?}, {:?}", target_types[*first], target_types[*second]);
+                                    Type::AnyInt.matches(&target_types[*first])
+                                        .map_err(err_map)?
+                                        .matches(&target_types[*second]).map_err(err_map)?
+                                }
+                                DualOperator::Equal | DualOperator::NotEqual => {
+                                    target_types[*first].matches(&target_types[*second]).map_err(err_map)?;
+                                    Type::Bool
+                                },
+                                DualOperator::GreaterEqual |  DualOperator::LesserEqual |
+                                DualOperator::Greater |DualOperator::Lesser => {
+                                    Type::AnyInt.matches(&target_types[*first]).map_err(err_map)?
+                                        .matches(&target_types[*second]).map_err(err_map)?;
+                                    Type::Bool
+                                },
+                                DualOperator::BoolAnd | DualOperator::BoolOr => {
+                                    Type::Bool.matches(&target_types[*first]).map_err(err_map)?
+                                        .matches(&target_types[*second]).map_err(err_map)?
+                                }
+                            }
+                        }
+                        Expression::SingleOperator { operator, expr} => {
+                            match operator {
+                                SingleOperator::Not => Type::Bool.matches(&target_types[*expr])
+                                    .map_err(err_map)?,
+                                SingleOperator::Pass => Type::Any
+                            }
+                        }
+                        Expression::IntLiteral(_) => Type::AnyInt,
+                        Expression::BoolLiteral(_) => Type::Bool,
+                        Expression::None => Type::Any
+                    })
+                }
+                println!("last : {:?}, {:?}", target_types.last().unwrap(), var.var_type);
+                target_types.last().unwrap().matches(&var.var_type).map_err(err_map)?;
+            }
+        }
+        Ok(())
     }
 
     fn get_pos(&self) -> (usize, usize) {
@@ -434,10 +504,6 @@ fn parse_declarations<'a> (parser : &mut Parser) -> Result<(), ParseError> {
                     let name = parser.read_word()?;
                     parser.add_variable(name, t)?;
                     parser.assert_char(';')?;
-                    parser.variables.insert(
-                        name.to_owned(),
-                        parser.arena.alloc(Variable { var_type : t})
-                    );
                 } else {
                     return Err(ParseError::new(
                         ParseErrorType::UnknownType(word.to_owned()),
@@ -448,7 +514,6 @@ fn parse_declarations<'a> (parser : &mut Parser) -> Result<(), ParseError> {
         }
     }
 }
-
 
 fn parse_program(mut parser : Parser) -> Result<Program, ParseError> {
     parse_declarations(&mut parser)?;
@@ -462,12 +527,16 @@ fn parse_program(mut parser : Parser) -> Result<Program, ParseError> {
             ParseError::new(ParseErrorType::UnexpectedLiteral(word.to_owned()), &parser)
         )?;
         parser.assert_char('=')?;
-        let expr = parser.parse_expression()?;
+        let mut expressions = Vec::new();
+        parser.parse_expression(&mut expressions)?;
         parser.assert_char(';')?;
         statements.push(Statement::Assignment {
             var,
-            expr
+            expr : expressions
         });
+    }
+    for statement in &statements {
+        parser.type_validate(statement)?;
     }
     println!("{:?}", parser.variables);
     Ok(Program {
