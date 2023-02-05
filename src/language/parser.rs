@@ -4,9 +4,11 @@ use std::fmt::{Display, Formatter, Debug};
 use bumpalo::Bump;
 use std::str::FromStr;
 use std::cmp::Ordering;
+use crate::language::expression_builder::ExpressionBuilder;
+use std::io::SeekFrom::Start;
 
 #[derive(Debug)]
-enum ParseErrorType {
+pub(super) enum ParseErrorType {
     Unknown,
     UnexpectedCharacter(char),
     UnexpectedLiteral(String),
@@ -101,7 +103,7 @@ impl <'a> PartialEq for Type<'a> {
 
 
 #[derive(Debug)]
-struct Variable <'a> {
+pub struct Variable <'a> {
     var_type : &'a Type<'a>
 }
 
@@ -112,7 +114,7 @@ impl <'a> PartialEq for Variable<'a> {
 }
 
 #[derive(Debug, Copy, Clone)]
-enum DualOperator {
+pub enum DualOperator {
     Divide = 0,
     Multiply = 1,
     Minus = 2,
@@ -128,13 +130,43 @@ enum DualOperator {
     BoolOr = 11,
 }
 
+impl Display for DualOperator {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!("{}", match self {
+            DualOperator::Divide => "/",
+            DualOperator::Multiply => "*",
+            DualOperator::Minus => "-",
+            DualOperator::Plus => "+",
+            DualOperator::Equal => "==",
+            DualOperator::NotEqual => "!=",
+            DualOperator::GreaterEqual => ">=",
+            DualOperator::LesserEqual => "<=",
+            DualOperator::Greater => ">",
+            DualOperator::Lesser => "<",
+            DualOperator::BoolAnd => "&&",
+            DualOperator::BoolOr => "||"
+        }))
+    }
+}
+
+
 #[derive(Debug, Copy, Clone)]
-enum SingleOperator {
-    Not = -1
+pub enum SingleOperator {
+    Not = -1,
+    Pass = isize::MAX,
+}
+
+impl Display for SingleOperator{
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!("{}", match self {
+            SingleOperator::Not => "!",
+            SingleOperator::Pass => ""
+        }))
+    }
 }
 
 #[derive(Debug)]
-enum Expression <'a> {
+pub enum Expression <'a> {
     Variable(&'a Variable<'a>),
     Operator {first : Box<Expression<'a>>, operator : DualOperator, second : Box<Expression<'a>>},
     SingleOperator {operator : SingleOperator, expr :  Box<Expression<'a>>},
@@ -143,130 +175,17 @@ enum Expression <'a> {
     None // Used while parsing to indicate a subexpression not yet parsed
 }
 
-#[derive(Debug)]
-enum ExpressionBuilderType <'a>{
-    Atom(Box<Expression<'a>>),
-    SingleOperator(SingleOperator),
-    DualOperator(DualOperator)
-}
-
-struct ExpressionBuilderNode<'a> {
-    expression_type: ExpressionBuilderType<'a>,
-    par : usize,
-    parent : *mut ExpressionBuilder<'a>,
-    first_child : *mut ExpressionBuilder<'a>,
-    second_child : *mut ExpressionBuilder<'a>
-}
-
-
-#[derive(Debug)]
-struct  ExpressionBuilder <'a> {
-    expression_type: ExpressionBuilderType<'a>,
-    par : usize,
-    parent : *mut ExpressionBuilder<'a>,
-    first_child : *mut ExpressionBuilder<'a>,
-    second_child : *mut ExpressionBuilder<'a>
-}
-
-impl<'a> ExpressionBuilder <'a> {
-    fn get_expression(ptr : *mut ExpressionBuilder<'a>) -> Box<Expression<'a>> {
-        let mut res = Box::new(Expression::None);
-        let mut stack = vec![(ptr, &mut res)];
-        while let Some((top,  dest)) = stack.pop() {
-            let mut top = unsafe {Box::from_raw(top)};
-            match &mut top.expression_type {
-                ExpressionBuilderType::Atom(e) => {
-                    std::mem::swap(dest, e);
-                },
-                ExpressionBuilderType::SingleOperator(s) => {
-                    let mut e = Box::new(Expression::SingleOperator {
-                        operator: *s, expr: Box::new(Expression::None)
-                    });
-                    std::mem::swap(dest, &mut e);
-                    if let Expression::SingleOperator {ref mut expr, ..} = dest.as_mut() {
-                        stack.push((top.first_child, expr));
-                    } else {
-                        unreachable!();
-                    }
-                },
-                ExpressionBuilderType::DualOperator(s) => {
-                    let mut e = Box::new(Expression::Operator {
-                        operator: *s, first: Box::new(Expression::None), second : Box::new(Expression::None)
-                    });
-                    std::mem::swap(dest, &mut e);
-                    if let Expression::Operator {ref mut first, ref mut second, ..} = dest.as_mut() {
-                        stack.push((top.first_child, first));
-                        stack.push((top.second_child, second));
-                    } else {
-                        unreachable!();
-                    }
-                }
-            }
-            drop(top);
-        }
-        res
-    }
-
-    fn priority(&self) -> isize {
-        match self.expression_type {
-            ExpressionBuilderType::Atom(_) => isize::MIN,
-            ExpressionBuilderType::DualOperator(s) => s as isize,
-            ExpressionBuilderType::SingleOperator(s) => s as isize
-        }
-    }
-
-    fn atom(par : usize, expr : Box<Expression<'a>>, parent : *mut ExpressionBuilder<'a>) -> ExpressionBuilder<'a> {
-        ExpressionBuilder {
-            expression_type : ExpressionBuilderType::Atom(expr),
-            par,
-            parent,
-            first_child : std::ptr::null_mut(),
-            second_child : std::ptr::null_mut()
-        }
-    }
-
-    fn single_operator(par : usize, op : SingleOperator, parent : *mut ExpressionBuilder<'a>) -> ExpressionBuilder<'a> {
-        ExpressionBuilder {
-            expression_type : ExpressionBuilderType::SingleOperator(op),
-            par,
-            parent,
-            first_child : std::ptr::null_mut(),
-            second_child : std::ptr::null_mut()
-        }
-    }
-
-    fn dual_operator(par : usize, op : DualOperator, parent : *mut ExpressionBuilder<'a>) -> ExpressionBuilder<'a> {
-        ExpressionBuilder {
-            expression_type : ExpressionBuilderType::DualOperator(op),
-            par,
-            parent,
-            first_child : std::ptr::null_mut(),
-            second_child : std::ptr::null_mut()
-        }
-    }
-}
-
-impl <'a> Eq for ExpressionBuilder<'a> {}
-
-impl <'a> PartialEq for ExpressionBuilder<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.priority() == other.priority() && self.par == other.par
-    }
-}
-
-impl <'a> Ord for ExpressionBuilder<'a> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.partial_cmp(other).unwrap()
-    }
-}
-
-impl<'a> PartialOrd for ExpressionBuilder<'a> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        let par_cmp = self.par.cmp(&other.par);
-        if par_cmp.is_eq() {
-            self.priority().partial_cmp(&other.priority())
-        } else {
-            Some(par_cmp)
+impl <'a> Display for Expression<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match &self {
+            Expression::Variable(v) => f.write_fmt(format_args!("{:?}", v.var_type)),
+            Expression::Operator {operator, first, second} =>
+                f.write_fmt(format_args!("({} {} {})",first, operator, second)),
+            Expression::SingleOperator {operator, expr} =>
+                f.write_fmt(format_args!("({}{})", operator, expr)),
+            Expression::IntLiteral(i) => f.write_fmt(format_args!("{}", i)),
+            Expression::BoolLiteral(b) => f.write_fmt(format_args!("{}", b)) ,
+            Expression::None => f.write_str("None")
         }
     }
 }
@@ -420,30 +339,21 @@ impl <'a>Parser<'a> {
         None
     }
 
-
-    // TODO, remove loop after, replace remaining with vec containing index to expression
     fn parse_expression<'b>(&'b mut self) -> Result<Expression<'a>, ParseError> {
         self.skip_while(|c| Parser::SPACES.contains(c));
-        let mut open_paren = Vec::new();
-        let mut prev : *mut ExpressionBuilder = std::ptr::null_mut();
+        let mut builder = ExpressionBuilder::new();
         loop {
             let next = self.peek_char().ok_or_else(||ParseError::new(ParseErrorType::EOF, self))?;
             let expr;
             match next {
                 '!' => {
                     self.skip();
-                    let new = Box::into_raw(Box::new(
-                        ExpressionBuilder::single_operator(open_paren.len(), SingleOperator::Not, prev)
-                    ));
-                    if !prev.is_null() {
-                        unsafe {(*prev).second_child = new;}
-                    }
-                    prev = new;
+                    builder.add_single_operator(SingleOperator::Not);
                     continue;
                 },
                 '(' => {
                     self.skip();
-                    open_paren.push(0);
+                    builder.open_parentheses();
                     continue;
                 },
                 '0'..='9' => {
@@ -465,59 +375,23 @@ impl <'a>Parser<'a> {
                     }
                 }
             };
+            builder.add_atom(expr);
             while let Some(')') = self.peek_char() {
-                if let Some(_) = open_paren.pop() {
-                    self.skip();
-                } else {
-                    return Err(ParseError::new(ParseErrorType::UnmatchedParen, self));
+                if let Err(_) = builder.close_parentheses() {
+                    break;
                 }
+                self.skip();
             }
-            let last = Box::into_raw(Box::new(ExpressionBuilder::atom(open_paren.len(), expr, prev)));
-            if !prev.is_null() {
-                unsafe {(*prev).second_child = last;}
-            }
-            prev = last;
             if let Some(operator) = self.read_dual_operator() {
-                let mut val = Box::into_raw(
-                    Box::new(ExpressionBuilder::dual_operator(open_paren.len(), operator, std::ptr::null_mut()))
-                );
-                let mut owner = unsafe {(*prev).parent};
-                loop {
-                    if owner.is_null() {
-                        unsafe {
-                            (*val).first_child = prev;
-                            (*prev).parent = val;
-                        }
-                        break;
-                    }
-                    else {
-                       unsafe {
-                           if *val > *owner {
-                               prev = owner;
-                               owner = (*owner).parent;
-                           } else {
-                               (*val).first_child = (*owner).second_child;
-                               (*(*owner).second_child).parent = val;
-                               (*owner).second_child = val;
-                               (*val).parent = owner;
-                               break;
-                           }
-                       }
-                    }
-                }
-                prev = val;
+                builder.add_dual_operator(operator);
             } else {
                 break;
             }
         }
-        unsafe {
-            while !(*prev).parent.is_null() {
-                prev = (*prev).parent;
-            }
+        if !builder.is_complete() {
+            return Err(ParseError::new(ParseErrorType::UnmatchedParen, self));
         }
-        let res = ExpressionBuilder::get_expression(prev);
-        println!("{:?}", res);
-        todo!()
+        Ok(*builder.into_expression())
     }
 
     fn get_pos(&self) -> (usize, usize) {
@@ -576,9 +450,9 @@ fn parse_declarations<'a> (parser : &mut Parser) -> Result<(), ParseError> {
 }
 
 
-fn parse_program<'a>(mut parser : Parser) -> Result<Program<'a>, ParseError> {
+fn parse_program(mut parser : Parser) -> Result<Program, ParseError> {
     parse_declarations(&mut parser)?;
-    let statements = Vec::new();
+    let mut statements = Vec::new();
     loop {
         let word = parser.read_word()?;
         if word == "end" {
@@ -590,13 +464,10 @@ fn parse_program<'a>(mut parser : Parser) -> Result<Program<'a>, ParseError> {
         parser.assert_char('=')?;
         let expr = parser.parse_expression()?;
         parser.assert_char(';')?;
-        println!("{:?}", expr);
-        let statement = Statement::Assignment {
+        statements.push(Statement::Assignment {
             var,
             expr
-        };
-
-
+        });
     }
     println!("{:?}", parser.variables);
     Ok(Program {

@@ -3,6 +3,85 @@ s32 b;
 u32 c;
 start
 
-c = 32 + 24 * 3 + 5 - 6;
+c = (4 * (2 + ((((2 * 4) - 3) - 4) - 5)));
 exit_code = c + 100;
 end
+
+
+_a = 4             _a[0:12, true]
+_b = 2             _b[1:11, true]
+_c = 2             _c[2:4, true]
+_d = 4             _d[3:4, true]
+_e = _c * _d       _e[4:6, false]
+_f = 3             _f[5:6, true]
+_g = _e - _f       _g[6:8, false]
+_h = 4             _h[7:8, true]
+_i = _g - _h       _i[8:10, false]
+_j = 5             _j[9:10, true]
+_k = _i - _j       _k[10:11, false]
+_l = _b + _k       _l[11:12, false]
+c = _a * _l        c[12:12, false]
+
+
+
+
+
+
+c = c * _l             c = rax, _a = c, _l = reg/mem
+c = 4
+_l = _l + 2        (symmetric),_l = rcx, _b = im(2), _k = _l
+_l = _l - 5         _i = _l, _j = im(5)
+-
+_l = _l - 4         _g = _l, _h = im(4)
+-
+_l = _l - 3         _e:= _l, _f = im(3)
+_l = _e
+-
+_e = _e * _d        _e = rax, _d = rcx
+_e = 2
+_d = 4
+
+rcx = 4
+rax = 2
+rax = rax * rcx
+rcx = rax
+rcx = rcx - 3
+rcx  = rcx - 4
+rcx = rcx - 5
+rcx = rcx + 2
+rax = 4
+rax = rax * rcx
+
+mov rcx, 4
+mov rax, 2
+mul rcx
+mov rcx, rax
+sub rcx, 3
+sub rcx, 4
+sub rcx, 5
+add rcx, 2
+mov rax, 4
+mul rcx
+
+
+algorithm:
+    turn tree into list of pseudo_instructions collect variables, assignment, first use, last use, is imm
+    move all pseudo_instructions to just before first use
+    go from back of list:
+        if dual:
+            if (var_2.is_imm or var_1.is_imm and symmetric) and has fitting mnemonic:
+                choose that mnemonic
+            if required(op0 == op1):
+                if type_overlap(var_0, var_1):
+                    var_1 := var_0
+                else:
+                    prepend instruction var_1 = var_0
+                var_0 = choose reg / mem
+            else if allowed(op0 == op1) and type_overlap(var_0, var_1):
+                var_1 := var_0
+                var_0 = choose reg / mem
+            else:
+                var_0 = choose reg / mem
+                var_1 = choose reg / mem
+
+
