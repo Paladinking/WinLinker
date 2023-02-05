@@ -3,9 +3,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter, Debug};
 use bumpalo::Bump;
 use std::str::FromStr;
-use std::cmp::Ordering;
 use crate::language::expression_builder::ExpressionBuilder;
-use std::io::SeekFrom::Start;
 
 #[derive(Debug)]
 pub(super) enum ParseErrorType {
@@ -94,17 +92,17 @@ impl Display for ParseError {
 impl Error for ParseError {}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Type<'a> {
+enum Type {
     S32,
     U32,
     Bool,
-    Plain {size : usize, name : &'a str, id : usize},
+    Plain {id : usize},
     AnyInt,
     Any
 }
 
-impl <'a> Type<'a> {
-    fn matches(&self, other : &Type<'a>) -> Result<Type<'a>, ()> {
+impl Type {
+    fn matches(&self, other : &Type) -> Result<Type, ()> {
         match (self, other) {
             (Type::Any, t) | (t, Type::Any) => Ok(*t),
             (Type::AnyInt, Type::S32) | (Type::S32, Type::AnyInt) => Ok(Type::S32),
@@ -117,11 +115,11 @@ impl <'a> Type<'a> {
 
 
 #[derive(Debug)]
-pub struct Variable <'a> {
-    var_type : Type<'a>
+pub struct Variable {
+    var_type : Type
 }
 
-impl <'a> PartialEq for Variable<'a> {
+impl PartialEq for Variable {
     fn eq(&self, other: &Self) -> bool {
         return std::ptr::eq(self, other);
     }
@@ -181,7 +179,7 @@ impl Display for SingleOperator{
 
 #[derive(Debug)]
 pub enum Expression <'a> {
-    Variable(&'a Variable<'a>),
+    Variable(&'a Variable),
     Operator {first : usize, operator : DualOperator, second : usize},
     SingleOperator {operator : SingleOperator, expr :  usize},
     IntLiteral(u64),
@@ -205,7 +203,7 @@ impl <'a> Display for Expression<'a> {
 }
 
 enum Statement <'a>{
-    Assignment {var : &'a Variable<'a>, expr : Vec<Expression<'a>>}
+    Assignment {var : &'a Variable, expr : Vec<Expression<'a>>}
 }
 
 struct Program <'a> {
@@ -216,8 +214,8 @@ struct Parser<'a> {
     data : &'a str,
     chars : std::str::Chars<'a>,
     arena : &'a Bump,
-    types : HashMap<String, Type<'a>>,
-    variables : HashMap<String, &'a Variable<'a>>
+    types : HashMap<String, Type>,
+    variables : HashMap<String, &'a Variable>
 }
 
 fn create_primitives(arena : &Bump) -> HashMap<String, Type> {
@@ -299,7 +297,7 @@ impl <'a>Parser<'a> {
         }
     }
 
-    fn add_variable(&mut self, name : &str, t : Type<'a>) -> Result<(), ParseError> {
+    fn add_variable(&mut self, name : &str, t : Type) -> Result<(), ParseError> {
         if Parser::KEYWORDS.iter().any(|&s| s == name) {
             return Err(ParseError::new(
                 ParseErrorType::BadVarName(name.to_owned()), self

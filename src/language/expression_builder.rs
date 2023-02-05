@@ -53,7 +53,6 @@ impl<'a> PartialOrd for ExpressionBuilderNode<'a> {
     }
 }
 
-
 pub(crate) struct ExpressionBuilder <'a> {
     root : *mut ExpressionBuilderNode<'a>,
     open_paren : Vec<usize>,
