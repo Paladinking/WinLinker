@@ -1,5 +1,5 @@
 use super::parser::SingleOperator;
-use crate::language::parser::{Expression, DualOperator};
+use crate::language::parser::{Expression, DualOperator, ExpressionData};
 use std::cmp::Ordering;
 
 
@@ -79,7 +79,7 @@ impl<'a> ExpressionBuilder <'a> {
         return self.open_paren.is_empty()
     }
 
-    pub(crate) fn into_expression(self, expressions : &mut Vec<Expression<'a>>) {
+    pub(crate) fn into_expression(self, expressions : &mut Vec<ExpressionData<'a>>) {
         let mut res : usize = 0;
         let val = unsafe { // Root never changes, is always valid
             if (*self.root).second_child.is_null() {
@@ -93,7 +93,7 @@ impl<'a> ExpressionBuilder <'a> {
             match &mut top.expression_type {
                 ExpressionBuilderType::Atom(e) => {
                     unsafe {*dest = expressions.len()};
-                    expressions.push(std::mem::replace(e, Expression::None));
+                    expressions.push(ExpressionData::new(std::mem::replace(e, Expression::None)));
                     drop(top);
                 },
                 ExpressionBuilderType::SingleOperator(s) => {

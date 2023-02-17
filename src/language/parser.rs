@@ -92,11 +92,11 @@ impl Display for ParseError {
 impl Error for ParseError {}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Type {
+pub enum Type {
     S32,
     U32,
     Bool,
-    Plain {id : usize},
+    Plain { id: usize },
     AnyInt,
     Any
 }
@@ -111,12 +111,30 @@ impl Type {
             _ => Err(())
         }
     }
+
+    pub fn is_signed(&self) -> bool {
+        match self {
+            Type::S32 => true,
+            Type::U32 => false,
+            _ => panic!("Signed check on non integer type")
+        }
+    }
 }
 
 
 #[derive(Debug)]
 pub struct Variable {
-    var_type : Type
+    var_type : Type,
+    pub offset : usize,
+    pub global : bool
+}
+
+impl Variable {
+    fn new(var_type : Type) -> Variable {
+        Variable {
+            var_type, offset : 0, global : false
+        }
+    }
 }
 
 impl PartialEq for Variable {
@@ -187,6 +205,21 @@ pub enum Expression <'a> {
     None
 }
 
+#[derive(Debug)]
+pub struct ExpressionData<'a> {
+    pub expression : Expression<'a>,
+    pub t : Option<Type>
+}
+
+impl <'a> ExpressionData<'a> {
+    pub fn new(e : Expression<'a>) -> ExpressionData<'a>{
+        ExpressionData {
+            expression : e,
+            t : None
+        }
+    }
+}
+
 impl <'a> Display for Expression<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match &self {
@@ -202,8 +235,8 @@ impl <'a> Display for Expression<'a> {
     }
 }
 
-enum Statement <'a>{
-    Assignment {var : &'a Variable, expr : Vec<Expression<'a>>}
+pub enum Statement <'a>{
+    Assignment {var : &'a Variable, expr : Vec<ExpressionData<'a>>}
 }
 
 struct Program <'a> {
@@ -218,7 +251,7 @@ struct Parser<'a> {
     variables : HashMap<String, &'a Variable>
 }
 
-fn create_primitives(arena : &Bump) -> HashMap<String, Type> {
+fn create_primitives() -> HashMap<String, Type> {
     let mut types : HashMap<String, Type> = HashMap::new();
     types.insert(String::from("bool"), Type::Bool);
     types.insert(String::from("s32"), Type::S32);
@@ -231,11 +264,9 @@ impl <'a>Parser<'a> {
     const KEYWORDS : [&'static str; 2] = ["start", "end"];
 
     fn new(data : &'a str, arena : &'a Bump) -> Parser<'a> {
-        let types = create_primitives(arena);
+        let types = create_primitives();
         let mut variables : HashMap<String, &Variable> = HashMap::new();
-        variables.insert("exit_code".to_owned(), arena.alloc(Variable {
-            var_type : Type::U32
-        }));
+        variables.insert("exit_code".to_owned(), arena.alloc(Variable::new(Type::U32)));
         let chars = data.chars();
         Parser {
             data,
@@ -305,9 +336,7 @@ impl <'a>Parser<'a> {
         }
         self.variables.insert(
             name.to_owned(),
-            self.arena.alloc(Variable {
-                var_type : t
-            })
+            self.arena.alloc(Variable::new(t))
         );
         Ok(())
     }
@@ -351,7 +380,7 @@ impl <'a>Parser<'a> {
         None
     }
 
-    fn parse_expression<'b>(&'b mut self, expressions : &mut Vec<Expression<'a>>) -> Result<(), ParseError> {
+    fn parse_expression<'b>(&'b mut self, expressions : &mut Vec<ExpressionData<'a>>) -> Result<(), ParseError> {
         self.skip_while(|c| Parser::SPACES.contains(c));
         let mut builder = ExpressionBuilder::new();
         loop {
@@ -407,14 +436,13 @@ impl <'a>Parser<'a> {
         Ok(())
     }
 
-    pub(crate) fn type_validate(&self, statement: &Statement) -> Result<(), ParseError> {
+    pub(crate) fn type_validate(&self, statement: &mut Statement) -> Result<(), ParseError> {
         let err_map = |_| ParseError::new(ParseErrorType::TypeError("Pass".to_owned()), self);
         match statement {
             Statement::Assignment {var,expr} => {
                 let mut target_types = Vec::with_capacity(expr.len());
-                for e in expr.iter() {
-                    println!("{:?}", e);
-                    target_types.push(match e {
+                for e in expr.iter_mut() {
+                    target_types.push(match e.expression {
                         Expression::Variable(v) => {
                             v.var_type
                         }
@@ -422,30 +450,30 @@ impl <'a>Parser<'a> {
                             match operator {
                                 DualOperator::Divide | DualOperator::Multiply |
                                 DualOperator::Minus | DualOperator::Plus => {
-                                    println!("{:?}, {:?}", target_types[*first], target_types[*second]);
-                                    Type::AnyInt.matches(&target_types[*first])
+                                    println!("{:?}, {:?}", target_types[first], target_types[second]);
+                                    Type::AnyInt.matches(&target_types[first])
                                         .map_err(err_map)?
-                                        .matches(&target_types[*second]).map_err(err_map)?
+                                        .matches(&target_types[second]).map_err(err_map)?
                                 }
                                 DualOperator::Equal | DualOperator::NotEqual => {
-                                    target_types[*first].matches(&target_types[*second]).map_err(err_map)?;
+                                    target_types[first].matches(&target_types[second]).map_err(err_map)?;
                                     Type::Bool
                                 },
                                 DualOperator::GreaterEqual |  DualOperator::LesserEqual |
                                 DualOperator::Greater |DualOperator::Lesser => {
-                                    Type::AnyInt.matches(&target_types[*first]).map_err(err_map)?
-                                        .matches(&target_types[*second]).map_err(err_map)?;
+                                    Type::AnyInt.matches(&target_types[first]).map_err(err_map)?
+                                        .matches(&target_types[second]).map_err(err_map)?;
                                     Type::Bool
                                 },
                                 DualOperator::BoolAnd | DualOperator::BoolOr => {
-                                    Type::Bool.matches(&target_types[*first]).map_err(err_map)?
-                                        .matches(&target_types[*second]).map_err(err_map)?
+                                    Type::Bool.matches(&target_types[first]).map_err(err_map)?
+                                        .matches(&target_types[second]).map_err(err_map)?
                                 }
                             }
                         }
                         Expression::SingleOperator { operator, expr} => {
                             match operator {
-                                SingleOperator::Not => Type::Bool.matches(&target_types[*expr])
+                                SingleOperator::Not => Type::Bool.matches(&target_types[expr])
                                     .map_err(err_map)?,
                                 SingleOperator::Pass => Type::Any
                             }
@@ -453,7 +481,8 @@ impl <'a>Parser<'a> {
                         Expression::IntLiteral(_) => Type::AnyInt,
                         Expression::BoolLiteral(_) => Type::Bool,
                         Expression::None => Type::Any
-                    })
+                    });
+                    e.t = target_types.last().cloned();
                 }
                 println!("last : {:?}, {:?}", target_types.last().unwrap(), var.var_type);
                 target_types.last().unwrap().matches(&var.var_type).map_err(err_map)?;
@@ -533,7 +562,7 @@ fn parse_program(mut parser : Parser) -> Result<Program, ParseError> {
             expr : expressions
         });
     }
-    for statement in &statements {
+    for statement in &mut statements {
         parser.type_validate(statement)?;
     }
     println!("{:?}", parser.variables);
