@@ -125,14 +125,13 @@ impl Type {
 #[derive(Debug)]
 pub struct Variable {
     var_type : Type,
-    pub offset : usize,
     pub global : bool
 }
 
 impl Variable {
     fn new(var_type : Type) -> Variable {
         Variable {
-            var_type, offset : 0, global : false
+            var_type, global : false
         }
     }
 }

@@ -10,28 +10,5 @@ mod language;
 
 fn main() -> Result<()> {
     language::parser::read_program(String::from(""));
-    /*
-    let data = std::fs::read("main.exe")?;
-    let header = PortableExecutable::from_bytes_iter(&mut data.iter());
-
-    let h = header.unwrap();
-
-    println!("Alignment : {}, {}",h.optional_header.as_ref().unwrap().section_alignment, h.optional_header.as_ref().unwrap().file_alignment);
-    for dd in &h.optional_header.as_ref().unwrap().data_directories {
-        if dd.virtual_address != 0 {
-            println!("{:?}", dd);
-        }
-    }
-    println!("{:?}", characteristics::get_all(&CoffFileHeader::CHARACTERISTICS, h.coff_file_header.characteristics));
-    for sh  in h.section_table {
-        println!("{:?}, {:?}", sh, characteristics::get_all(&SectionHeader::CHARACTERISTICS, sh.characteristics));
-    }
-    println!("{:?}", h.import_section);
-    if let Some(reloc_blocks) = h.reloc_section {
-        for block in reloc_blocks {
-            println!("{:?}", block);
-        }
-    }
-    println!("{:?}", h.export_section.unwrap());*/
     Ok(())
 }

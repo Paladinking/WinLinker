@@ -1,5 +1,5 @@
 use super::parser::SingleOperator;
-use crate::language::parser::{Expression, DualOperator, ExpressionData};
+use crate::language::parser::{Expression, DualOperator, ExpressionData, Variable};
 use std::cmp::Ordering;
 
 
