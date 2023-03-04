@@ -1,6 +1,6 @@
-use super::parser::SingleOperator;
-use crate::language::parser::{Expression, DualOperator, ExpressionData, Variable};
+use crate::language::parser::{Expression, ExpressionData};
 use std::cmp::Ordering;
+use crate::language::operator::{SingleOperator, DualOperator};
 
 
 enum ExpressionBuilderType <'a>{
@@ -15,7 +15,8 @@ struct ExpressionBuilderNode<'a> {
     par : usize,
     parent : *mut ExpressionBuilderNode<'a>,
     first_child : *mut ExpressionBuilderNode<'a>,
-    second_child : *mut ExpressionBuilderNode<'a>
+    second_child : *mut ExpressionBuilderNode<'a>,
+    pos : (usize, usize)
 }
 
 impl <'a> ExpressionBuilderNode<'a> {
@@ -66,7 +67,8 @@ impl<'a> ExpressionBuilder <'a> {
             par : 0,
             parent : std::ptr::null_mut(),
             first_child : std::ptr::null_mut(),
-            second_child: std::ptr::null_mut()
+            second_child: std::ptr::null_mut(),
+            pos : (0, 0)
         }));
         ExpressionBuilder {
             root,
@@ -93,11 +95,11 @@ impl<'a> ExpressionBuilder <'a> {
             match &mut top.expression_type {
                 ExpressionBuilderType::Atom(e) => {
                     unsafe {*dest = expressions.len()};
-                    expressions.push(ExpressionData::new(std::mem::replace(e, Expression::None)));
+                    expressions.push(ExpressionData::new(std::mem::replace(e, Expression::None), top.pos));
                     drop(top);
                 },
                 ExpressionBuilderType::SingleOperator(s) => {
-                    let mut e = Expression::SingleOperator {
+                    let e = Expression::SingleOperator {
                         operator: *s, expr: 0
                     };
                     top.expression_type = ExpressionBuilderType::Atom(e);
@@ -110,7 +112,7 @@ impl<'a> ExpressionBuilder <'a> {
                     stack.push(child);
                 },
                 ExpressionBuilderType::DualOperator(s) => {
-                    let mut e = Expression::Operator {
+                    let e = Expression::Operator {
                         operator: *s, first: 0, second : 0
                     };
                     top.expression_type = ExpressionBuilderType::Atom(e);
@@ -136,13 +138,14 @@ impl<'a> ExpressionBuilder <'a> {
         Ok(())
     }
 
-    pub(crate) fn add_atom(&mut self, expr : Expression<'a>) {
+    pub(crate) fn add_atom(&mut self, expr : Expression<'a>, pos : (usize, usize)) {
         let atom = Box::into_raw(Box::new(ExpressionBuilderNode {
             expression_type: ExpressionBuilderType::Atom(expr),
             par: self.open_paren.len(),
             parent: self.prev,
             first_child: std::ptr::null_mut(),
-            second_child: std::ptr::null_mut()
+            second_child: std::ptr::null_mut(),
+            pos
         }));
         unsafe {
             if let ExpressionBuilderType::Atom(_) = (*self.prev).expression_type {
@@ -153,13 +156,14 @@ impl<'a> ExpressionBuilder <'a> {
         self.prev = atom;
     }
 
-    pub(crate) fn add_single_operator(&mut self, s : SingleOperator) {
+    pub(crate) fn add_single_operator(&mut self, s : SingleOperator, pos : (usize, usize)) {
         let node = Box::into_raw(Box::new(ExpressionBuilderNode {
             expression_type : ExpressionBuilderType::SingleOperator(s),
             par : self.open_paren.len(),
             parent : self.prev,
             first_child : std::ptr::null_mut(),
-            second_child : std::ptr::null_mut()
+            second_child : std::ptr::null_mut(),
+            pos
         }));
         unsafe {
             if let ExpressionBuilderType::Atom(_) = (*self.prev).expression_type {
@@ -176,7 +180,8 @@ impl<'a> ExpressionBuilder <'a> {
             par : self.open_paren.len(),
             parent : self.prev,
             first_child : std::ptr::null_mut(),
-            second_child : std::ptr::null_mut()
+            second_child : std::ptr::null_mut(),
+            pos : (0, 0)
         }));
         unsafe {
             if !matches!((*self.prev).expression_type, ExpressionBuilderType::Atom(_)) {
@@ -191,6 +196,7 @@ impl<'a> ExpressionBuilder <'a> {
             (*(*owner).second_child).parent = node;
             (*owner).second_child = node;
             (*node).parent = owner;
+            (*node).pos = (*(*node).first_child).pos;
         }
         self.prev = node;
     }
