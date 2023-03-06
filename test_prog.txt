@@ -7,7 +7,7 @@ start
 a = 5;
 b = 100000000000000000;
 d = 100 > a && true != false || !(20 + 30 >= 15);
-
+a = 10 * b / 10;
 
 exit_code = c + 100;
 end
@@ -16,6 +16,11 @@ end
 b = ((((b * 4) - 3) - 4) - 5) + a
 a = a + b
 a = a * 4
+
+Fel just nu:
+d:s register blir inte avalokerat
+c blir inte allokerat alls
+destinationen kanske är allokerad redan!
 
 
 _a = 4             _a[0:12, true]
