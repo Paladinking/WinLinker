@@ -1,6 +1,6 @@
 pub mod amd_win64 {
     use std::cell::{Cell};
-    use crate::language::parser::{self, Statement, Expression, ExpressionData, StatementData, Variable};
+    use crate::language::parser::{Statement, Expression, ExpressionData, StatementData, Variable};
     use std::collections::HashMap;
     use bumpalo::Bump;
     use crate::language::operator::{DualOperator, SingleOperator};
@@ -8,7 +8,7 @@ pub mod amd_win64 {
 
     #[derive(Debug, Copy, Clone)]
     enum BasicOperation {
-        IMul, Mul, Add, Sub, IDiv, Div, Move, Push, Pop, Cmp, SetE, SetNe, SetA, SetB, SetAE, SetBE, SetG, SetL,
+        IMul, Mul, Add, Sub, IDiv, Div, Mov, Push, Pop, Cmp, SetE, SetNe, SetA, SetB, SetAE, SetBE, SetG, SetL,
         SetGE, SetLE, And, Or, Xor
     }
 
@@ -20,7 +20,7 @@ pub mod amd_win64 {
                 BasicOperation::And | BasicOperation::Or | BasicOperation::Xor => true,
 
                 BasicOperation::Sub | BasicOperation::IDiv | BasicOperation::Div |
-                BasicOperation::Move | BasicOperation::Push | BasicOperation::Pop |
+                BasicOperation::Mov | BasicOperation::Push | BasicOperation::Pop |
                 BasicOperation::Cmp | BasicOperation::SetE | BasicOperation::SetNe |
                 BasicOperation::SetA | BasicOperation::SetB | BasicOperation::SetAE |
                 BasicOperation::SetBE | BasicOperation::SetG | BasicOperation::SetL |
@@ -40,7 +40,7 @@ pub mod amd_win64 {
         // 00000001 means first, 00000010 means second, 00000101 means first and third etc
         fn destroyed(&self) -> u8 {
             match self {
-                BasicOperation::Move | BasicOperation::Cmp | BasicOperation::Push |
+                BasicOperation::Mov | BasicOperation::Cmp | BasicOperation::Push |
                 BasicOperation::Pop | BasicOperation::SetE | BasicOperation::SetNe |
                 BasicOperation::SetA | BasicOperation::SetB | BasicOperation::SetAE |
                 BasicOperation::SetBE | BasicOperation::SetG | BasicOperation::SetL |
@@ -57,7 +57,7 @@ pub mod amd_win64 {
                 BasicOperation::Div | BasicOperation::IDiv | BasicOperation::Mul => RAX,
 
                 BasicOperation::IMul | BasicOperation::Add | BasicOperation::Sub |
-                BasicOperation::Move | BasicOperation::And | BasicOperation::Or |
+                BasicOperation::Mov | BasicOperation::And | BasicOperation::Or |
                 BasicOperation::Xor | BasicOperation::Cmp  => MEM_GEN_REG,
 
                 BasicOperation::Push | BasicOperation::Pop | BasicOperation::SetE | BasicOperation::SetNe |
@@ -69,12 +69,12 @@ pub mod amd_win64 {
 
         fn second_bitmap(&self) -> u64 {
             match self {
-                BasicOperation::IDiv | BasicOperation::Div | BasicOperation::Mul | //First is always rax
-                BasicOperation::IMul => MEM_GEN_REG,
+                BasicOperation::IDiv | BasicOperation::Div => MEM_GEN_REG & !RDX,
+                BasicOperation::Mul | BasicOperation::IMul => MEM_GEN_REG,
                 BasicOperation::Add | BasicOperation::Sub | BasicOperation::Cmp |
                 BasicOperation::And | BasicOperation::Or | BasicOperation::Xor =>
                    MEM_GEN_REG | IMM32 | IMM32 | IMM16 | IMM8,
-                BasicOperation::Move => MEM_GEN_REG | IMM64 | IMM32 | IMM32 | IMM16 | IMM8,
+                BasicOperation::Mov => MEM_GEN_REG | IMM64 | IMM32 | IMM32 | IMM16 | IMM8,
                 BasicOperation::Push | BasicOperation::Pop | BasicOperation::SetE | BasicOperation::SetNe |
                 BasicOperation::SetA | BasicOperation::SetB | BasicOperation::SetAE | BasicOperation::SetBE |
                 BasicOperation::SetG | BasicOperation::SetL | BasicOperation::SetGE |
@@ -186,7 +186,7 @@ pub mod amd_win64 {
                Register::new_general(R14, 13),
                Register::new_general(R15, 14)
             ];
-            let mut allocations = vec![MemoryAllocation::None];
+            let allocations = vec![MemoryAllocation::None];
             RegisterState {
                 registers, memory : Vec::new(), allocations, free_gen : GEN_REG
             }
@@ -226,7 +226,21 @@ pub mod amd_win64 {
             return self.memory.len() - 1;
         }
 
-        fn allocate(&mut self, operand : &Operand, bitmap : u64) -> u64 {
+        // Allocates a location for operand to a location contained in bitmap.
+        // Potentially inserts a move to free a register, moving it to another
+        // register or memory location. The destination of such a move will not be to
+        // any location contained in invalidated.
+        fn allocate(&mut self, operand : &Operand, bitmap : u64, invalidated : u64) -> u64 {
+            if let MemoryAllocation::Hint(map) = self.allocations[operand.id.get()] {
+                if let Some(index) = Self::get_register(map & bitmap & self.free_gen) {
+                    self.registers[index].operand = Some(self.allocations.len());
+                    operand.id.replace(self.allocations.len());
+                    self.allocations.push(MemoryAllocation::Register(index));
+                    self.free_gen &= !self.registers[index].bitmap;
+                    return self.registers[index].bitmap;
+                }
+            }
+
             let location = Self::get_register(bitmap & self.free_gen);
             if let Some(index) = location {
                 self.registers[index].operand = Some(self.allocations.len());
@@ -244,11 +258,12 @@ pub mod amd_win64 {
             let location = Self::get_register(bitmap).unwrap();
             let prev_owner = self.registers[location].operand.unwrap();
             let s = self.to_string(prev_owner);
-            if let Some(reg) = Self::get_register(self.free_gen & !self.registers[location].bitmap) {
+            if let Some(reg) = Self::get_register(self.free_gen & !self.registers[location].bitmap & !invalidated) {
                 // Insert Move
 
                 self.allocations[prev_owner] = MemoryAllocation::Register(reg);
                 self.registers[reg].operand = Some(prev_owner);
+                self.free_gen &= !self.registers[reg].bitmap;
             } else {
                 // Insert Move
                 let pos = self.get_memory();
@@ -274,6 +289,30 @@ pub mod amd_win64 {
                 MemoryAllocation::Hint(_) | MemoryAllocation::None => panic!("Double free")
             }
             self.allocations[id] = MemoryAllocation::None;
+        }
+
+        fn invalidate_registers(&mut self, map : u64) {
+            if map == 0 {
+                return;
+            }
+            for i in 0..self.registers.len() {
+                if self.registers[i].bitmap & map != 0 {
+                    if let Some(index) = self.registers[i].operand {
+                        let s = self.to_string(index);
+                        if let Some(reg) = Self::get_register(self.free_gen & !map) {
+                            self.allocations[index] = MemoryAllocation::Register(reg);
+                            self.registers[reg].operand = Some(index);
+                            self.free_gen &= !self.registers[reg].bitmap;
+                        } else {
+                            let mem = self.get_memory();
+                            self.allocations[index] = MemoryAllocation::Memory(mem);
+                        }
+                        println!("Move3 {}, {}", self.to_string(index), s);
+                        self.registers[i].operand = None;
+                        self.free_gen |= self.registers[i].bitmap;
+                    }
+                }
+            }
         }
 
         fn is_free(&self, id : usize) -> bool {
@@ -437,7 +476,7 @@ pub mod amd_win64 {
             Operand::new(0, location, size)
         }
 
-        fn convert_dual_operator(&mut self, locations : &mut Vec<&'a Operand>, mut first : usize, mut second : usize, size : OperandSize, t : Type, op : DualOperator) {
+        fn convert_dual_operator(&mut self, locations : &mut Vec<&'a Operand>, first : usize, second : usize, size : OperandSize, t : Type, op : DualOperator) {
             if op.is_cmp() {
                 self.instr.push(Instruction::new(BasicOperation::Cmp,
                                                  vec![locations[first], locations[second]],
@@ -479,7 +518,7 @@ pub mod amd_win64 {
             }
         }
 
-        fn convert_single_operator(&mut self, locations : &mut Vec<&'a Operand>, mut expr : usize, op : SingleOperator) {
+        fn convert_single_operator(&mut self, locations : &mut Vec<&'a Operand>, expr : usize, op : SingleOperator) {
             match op {
                 SingleOperator::Not => {
                     let new = self.arena.alloc(Operand::local(OperandSize::BYTE));
@@ -504,7 +543,7 @@ pub mod amd_win64 {
                         let id = v.id.borrow().unwrap();
                         locations.push(self.operands[id].clone());
                     },
-                    Expression::Operator { mut first, operator, mut second } => {
+                    Expression::Operator { first, operator, second } => {
                         locations[first].add_use(self.instr.len());
                         locations[second].add_use(self.instr.len());
                         let size = type_size(e.t);
@@ -531,8 +570,8 @@ pub mod amd_win64 {
                 let operand = *locations.last().unwrap();
                 operand.add_use(self.instr.len());
                 let first = self.arena.alloc(Operand::local(type_size(dest.var_type)));
-                let instruction = Instruction::new(BasicOperation::Move,
-                            vec![first, operand], Some(self.operands[dest.id.borrow().unwrap()]));
+                let instruction = Instruction::new(BasicOperation::Mov,
+                                                   vec![first, operand], Some(self.operands[dest.id.borrow().unwrap()]));
                 self.instr.push(instruction);
             } else if let Some(instruction) =  self.instr.last_mut() {
                 instruction.dest = Some(self.operands[dest.id.borrow().unwrap()]);
@@ -550,7 +589,15 @@ pub mod amd_win64 {
                 }
             }
 
+            let mut invalidation = 0;
             for (index, instruction) in self.instr.iter_mut().enumerate() {
+                let mut invalid = 0;
+                if let Some((i, map)) = self.invalidations.get(invalidation) {
+                    if *i == index {
+                        invalid = *map;
+                        invalidation += 1;
+                    }
+                }
                 let destroyed = instruction.operator.destroyed();
                 let mut bitmap = 1;
                 for (i, operand) in instruction.operands.iter_mut().enumerate() {
@@ -559,72 +606,67 @@ pub mod amd_win64 {
                     );
 
                     if self.register_state.is_free(operand.id.get()) {
-                        self.register_state.allocate(*operand, bitmap);
+                        self.register_state.allocate(*operand, bitmap, invalid);
                     }
                     let allocation_bitmap = self.register_state.allocation_bitmap(operand.id.get());
-                    if operand.last_use.get() > index && destroyed & (1 << i) != 0 || allocation_bitmap & bitmap == 0{
+                    if operand.last_use.get() > index && destroyed & (1 << i) != 0 || allocation_bitmap & bitmap == 0 {
                         let new = self.arena.alloc(Operand::local(operand.size));
-                        self.register_state.allocate(new, bitmap);
-                        println!("Move0 {}, {}", self.register_state.to_string(new.id.get()), self.register_state.to_string(operand.id.get()));
+                        let location = self.register_state.allocate(new, bitmap, invalid);
+                        if location != allocation_bitmap {
+                            println!("Move0 {}, {}", self.register_state.to_string(new.id.get()), self.register_state.to_string(operand.id.get()));
+                        }
+
+                        if operand.last_use.get() <= index {
+                            self.register_state.free(operand.id.get());
+                        }
                         *operand = new;
                         // Add move
                     }
                     bitmap = self.register_state.allocation_bitmap(operand.id.get());
+                    if operand.last_use.get() <= index {
+                        invalid &= !bitmap;
+                    }
                 }
-                print!("{:?}", instruction.operator);
-                for &o in instruction.operands.iter() {
-                    print!(" {}", self.register_state.to_string(o.id.get()));
-                }
-                println!();
+
+                self.register_state.invalidate_registers(invalid);
+                let mut free = true;
                 if let Some(dest) = instruction.dest {
                     if self.register_state.is_free(dest.id.get()) {
-                        if dest.last_use.get() <= index {
-                            self.register_state.free(instruction.operands.first().unwrap().id.get());
-                        } else {
-                            dest.id.replace(instruction.operands.first().unwrap().id.get());
-                        }
+                        dest.id.replace(instruction.operands.first().unwrap().id.get());
+                        instruction.operands.first().unwrap().last_use.replace(dest.last_use.get());
                     } else {
-                        println!("Move1 {}, {}", self.register_state.to_string(dest.id.get()), self.register_state.to_string(instruction.operands.first().unwrap().id.get()));
-                        //Add move
-                    }
-                } else if let Some(&first) = instruction.operands.first() {
-                    if first.last_use.get() <= index {
-                        self.register_state.free(first.id.get());
+                        free = false;
                     }
                 }
-                for &operand in &instruction.operands[1..] { // Nope.., first == dest probably
+
+                let mut s = format!("{:?}", instruction.operator);
+
+                for &o in instruction.operands.iter() {
+                    s += " ";
+                    s += &self.register_state.to_string(o.id.get());
+                }
+                let f = format!("{}", self.register_state.to_string(instruction.operands.first().unwrap().id.get()));
+                for &operand in &instruction.operands {
                     if operand.last_use.get() <= index {
                         self.register_state.free(operand.id.get());
                     }
                 }
+
+                println!("{}", s);
+                if let Some(dest) = instruction.dest {
+                    if !free {
+                        println!("Move1 {}, {}", self.register_state.to_string(dest.id.get()), f);
+                    }
+                }
+
             }
         }
     }
 
-    pub fn compile_statements(arena : &Bump, statements : &Vec<StatementData>, vars : &HashMap<String, &parser::Variable>)  {
+    pub fn compile_statements(arena : &Bump, statements : &Vec<StatementData>, vars : &HashMap<String, &Variable>)  {
 
         let mut compiler = Compiler::new(arena, statements, vars);
 
         compiler.compile_statements();
-
-        for var in vars {
-            println!("{}, {}", var.0, var.1.id.borrow().unwrap());
-        }
-
-        for (i, o ) in compiler.instr.iter().enumerate() {
-            let out = |index : &Operand| {
-                compiler.register_state.to_string(index.id.get())
-            };
-            let oper = o.operands.iter().map(|op| *op).map(out).collect::<Vec<String>>();
-            let dest = o.dest.clone().map(|i| out(i)).unwrap_or("None".to_string());
-            //println!("{}, {:?}, {:?}, => {}", i, o.operator,oper, dest);
-
-        }
-
-
-        for (i, o ) in compiler.operands.iter().enumerate() {
-            println!("{}, {:?}",i, o);
-        }
-
     }
 }
