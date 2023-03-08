@@ -1,9 +1,8 @@
 pub mod amd_win64 {
-    use std::cell::{RefCell, RefMut};
+    use std::cell::{Cell};
     use crate::language::parser::{self, Statement, Expression, ExpressionData, StatementData, Variable};
     use std::collections::HashMap;
-    use std::ops::{BitXor, Deref, Not};
-    use std::rc::Rc;
+    use bumpalo::Bump;
     use crate::language::operator::{DualOperator, SingleOperator};
     use crate::language::types::Type;
 
@@ -14,64 +13,43 @@ pub mod amd_win64 {
     }
 
     impl BasicOperation {
+        // Returns true if swapping first and second operand does not affect the result
         fn is_symmetric(&self) -> bool {
             match self {
-                BasicOperation::IMul => true,
-                BasicOperation::Mul => true,
-                BasicOperation::Add => true,
-                BasicOperation::Sub => false,
-                BasicOperation::IDiv => false,
-                BasicOperation::Div => false,
-                BasicOperation::Move => false,
-                BasicOperation::Push => false,
-                BasicOperation::Pop => false,
-                BasicOperation::Cmp => false,
-                BasicOperation::SetE => false,
-                BasicOperation::SetNe => false,
-                BasicOperation::SetA => false,
-                BasicOperation::SetB => false,
-                BasicOperation::SetAE => false,
-                BasicOperation::SetBE => false,
-                BasicOperation::SetG => false,
-                BasicOperation::SetL => false,
-                BasicOperation::SetGE => false,
-                BasicOperation::SetLE => false,
-                BasicOperation::And => true,
-                BasicOperation::Or => true,
-                BasicOperation::Xor => true
+                BasicOperation::IMul | BasicOperation::Mul | BasicOperation::Add |
+                BasicOperation::And | BasicOperation::Or | BasicOperation::Xor => true,
+
+                BasicOperation::Sub | BasicOperation::IDiv | BasicOperation::Div |
+                BasicOperation::Move | BasicOperation::Push | BasicOperation::Pop |
+                BasicOperation::Cmp | BasicOperation::SetE | BasicOperation::SetNe |
+                BasicOperation::SetA | BasicOperation::SetB | BasicOperation::SetAE |
+                BasicOperation::SetBE | BasicOperation::SetG | BasicOperation::SetL |
+                BasicOperation::SetGE | BasicOperation::SetLE => false,
             }
         }
 
-        fn imm_2(&self, size : OperandSize) -> bool {
+        fn bitmap_hint(&self, n : usize) -> u64 {
+            match n {
+                0 => self.first_bitmap(),
+                1 => self.second_bitmap(),
+                _ => panic!("To many operands")
+            }
+        }
+
+        // Returns a bitmap to all operands that are overridden by the operation
+        // 00000001 means first, 00000010 means second, 00000101 means first and third etc
+        fn destroyed(&self) -> u8 {
             match self {
-                BasicOperation::IMul => false,
-                BasicOperation::Mul => false,
-                BasicOperation::Add => size as usize <= OperandSize::DWORD as usize,
-                BasicOperation::Sub => size as usize <= OperandSize::DWORD as usize,
-                BasicOperation::IDiv => false,
-                BasicOperation::Div => false,
-                BasicOperation::Move => true,
-                BasicOperation::Push => false,
-                BasicOperation::Pop => false,
-                BasicOperation::Cmp => size as usize <= OperandSize::DWORD as usize,
-                BasicOperation::SetE => false,
-                BasicOperation::SetNe => false,
-                BasicOperation::SetA => false,
-                BasicOperation::SetB => false,
-                BasicOperation::SetAE => false,
-                BasicOperation::SetBE => false,
-                BasicOperation::SetG => false,
-                BasicOperation::SetL => false,
-                BasicOperation::SetGE => false,
-                BasicOperation::SetLE => false,
-                BasicOperation::And => size as usize <= OperandSize::DWORD as usize,
-                BasicOperation::Or => size as usize <= OperandSize::DWORD as usize,
-                BasicOperation::Xor => size as usize <= OperandSize::DWORD as usize
-            }
-        }
+                BasicOperation::Move | BasicOperation::Cmp | BasicOperation::Push |
+                BasicOperation::Pop | BasicOperation::SetE | BasicOperation::SetNe |
+                BasicOperation::SetA | BasicOperation::SetB | BasicOperation::SetAE |
+                BasicOperation::SetBE | BasicOperation::SetG | BasicOperation::SetL |
+                BasicOperation::SetGE | BasicOperation::SetLE => 0,
 
-        fn dest_bitmap(&self) -> u64 {
-            self.first_bitmap()
+                BasicOperation::IMul | BasicOperation::Mul | BasicOperation::Add |
+                BasicOperation::Sub | BasicOperation::IDiv | BasicOperation::Div |
+                BasicOperation::Or | BasicOperation::And | BasicOperation::Xor => 1
+            }
         }
 
         fn first_bitmap(&self) -> u64 {
@@ -89,18 +67,30 @@ pub mod amd_win64 {
             }
         }
 
-        fn second_bitmap(&self, first_map: u64) -> u64 {
-            debug_assert!(first_map.count_ones() == 1);
+        fn second_bitmap(&self) -> u64 {
             match self {
                 BasicOperation::IDiv | BasicOperation::Div | BasicOperation::Mul | //First is always rax
-                BasicOperation::Add | BasicOperation::Sub | BasicOperation::IMul | BasicOperation::Move |
-                BasicOperation::Cmp | BasicOperation::And | BasicOperation::Or | BasicOperation::Xor => (first_map ^ MEM_GEN_REG) | GEN_REG,
-
+                BasicOperation::IMul => MEM_GEN_REG,
+                BasicOperation::Add | BasicOperation::Sub | BasicOperation::Cmp |
+                BasicOperation::And | BasicOperation::Or | BasicOperation::Xor =>
+                   MEM_GEN_REG | IMM32 | IMM32 | IMM16 | IMM8,
+                BasicOperation::Move => MEM_GEN_REG | IMM64 | IMM32 | IMM32 | IMM16 | IMM8,
                 BasicOperation::Push | BasicOperation::Pop | BasicOperation::SetE | BasicOperation::SetNe |
                 BasicOperation::SetA | BasicOperation::SetB | BasicOperation::SetAE | BasicOperation::SetBE |
                 BasicOperation::SetG | BasicOperation::SetL | BasicOperation::SetGE |
                 BasicOperation::SetLE => panic!("No second operand")
             }
+        }
+
+        fn next_bitmap(&self, first_map: u64, n : usize) -> u64 {
+            debug_assert!(first_map.count_ones() == 1);
+            match n {
+                0 => self.first_bitmap(),
+                1 => ((first_map ^ MEM) | !MEM) & self.second_bitmap(),
+                _ => panic!("Too many operands")
+            }
+
+
         }
     }
 
@@ -111,6 +101,17 @@ pub mod amd_win64 {
         BYTE = 1, WORD = 2, DWORD = 4, QWORD = 8,
     }
 
+    impl OperandSize {
+        fn to_imm(&self) -> u64 {
+            match self {
+                OperandSize::BYTE => IMM8,
+                OperandSize::WORD => IMM16,
+                OperandSize::DWORD => IMM32,
+                OperandSize::QWORD => IMM64
+            }
+        }
+    }
+
     struct Register {
        bitmap : u64, index : usize, operand : Option<usize>
     }
@@ -118,11 +119,6 @@ pub mod amd_win64 {
     impl Register {
         pub fn new_general(bitmap : u64, index : usize) -> Register {
             Register {bitmap, index, operand : None}
-        }
-
-        pub fn bitmap(&self) -> u64 {
-            return self.bitmap;
-            panic!("Not general register")
         }
     }
 
@@ -133,24 +129,28 @@ pub mod amd_win64 {
         free_gen : u64
     }
 
+    const MEM : u64 = 2_u64.pow(0);
+    const R15 : u64 = 2_u64.pow(1);
+    const R14 : u64 = 2_u64.pow(2);
+    const R13 : u64 = 2_u64.pow(3);
+    const R12 : u64 = 2_u64.pow(4);
+    const RSP : u64 = 2_u64.pow(5);
+    const RSI : u64 = 2_u64.pow(6);
+    const RDI : u64 = 2_u64.pow(7);
+    const RBP : u64 = 2_u64.pow(8);
+    const RBX : u64 = 2_u64.pow(9);
+    const R11 : u64 = 2_u64.pow(10);
+    const R10 : u64 = 2_u64.pow(11);
+    const R9 : u64 = 2_u64.pow(12);
+    const R8 : u64 = 2_u64.pow(13);
+    const RAX : u64 = 2_u64.pow(14);
+    const RDX : u64 = 2_u64.pow(15);
+    const RCX : u64 = 2_u64.pow(16);
 
-    const MEM : u64 = 1;
-    const R15 : u64 = 2;
-    const R14 : u64 = 4;
-    const R13 : u64 = 8;
-    const R12 : u64 = 16;
-    const RSP : u64 = 32;
-    const RSI : u64 = 64;
-    const RDI : u64 = 128;
-    const RBP : u64 = 256;
-    const RBX : u64 = 512;
-    const R11 : u64 = 1024;
-    const R10 : u64 = 2048;
-    const R9 : u64 = 4096;
-    const R8 : u64 = 8192;
-    const RAX : u64 = 16384;
-    const RDX : u64 = 32768;
-    const RCX : u64 = 65536;
+    const IMM8 : u64  = 2_u64.pow(60);
+    const IMM16 : u64 = 2_u64.pow(61);
+    const IMM32 : u64 = 2_u64.pow(62);
+    const IMM64 : u64 = 2_u64.pow(63);
 
 
     const VOL_GEN_REG : u64 = RAX | RCX | RDX | R8 | R9 | R10 | R11;
@@ -160,14 +160,15 @@ pub mod amd_win64 {
 
     #[derive(Debug, Clone, Copy)]
     enum MemoryAllocation{
-        Register(usize), Memory(usize), None
+        Register(usize), Memory(usize), Immediate(u64, u64),
+        Hint(u64), None
     }
 
     impl RegisterState {
         const VOLATILE_REGISTERS : usize = 7;
         const GENERAL_REGISTERS : usize = 15;
 
-        fn new(mut locations : usize) -> RegisterState {
+        fn new() -> RegisterState {
             let registers = vec![
                Register::new_general(RCX, 0),
                Register::new_general(RDX, 1),
@@ -185,7 +186,7 @@ pub mod amd_win64 {
                Register::new_general(R14, 13),
                Register::new_general(R15, 14)
             ];
-            let mut allocations = vec![MemoryAllocation::None; locations];
+            let mut allocations = vec![MemoryAllocation::None];
             RegisterState {
                 registers, memory : Vec::new(), allocations, free_gen : GEN_REG
             }
@@ -225,18 +226,19 @@ pub mod amd_win64 {
             return self.memory.len() - 1;
         }
 
-        fn allocate(&mut self, id : usize, bitmap : u64) -> u64 {
+        fn allocate(&mut self, operand : &Operand, bitmap : u64) -> u64 {
             let location = Self::get_register(bitmap & self.free_gen);
-
             if let Some(index) = location {
-                self.registers[index].operand = Some(id);
-                self.allocations[id] = MemoryAllocation::Register(index);
+                self.registers[index].operand = Some(self.allocations.len());
+                operand.id.replace(self.allocations.len());
+                self.allocations.push(MemoryAllocation::Register(index));
                 self.free_gen &= !self.registers[index].bitmap;
                 return self.registers[index].bitmap;
             }
             if bitmap & MEM != 0 {
                 let index = self.get_memory();
-                self.allocations[id] = MemoryAllocation::Memory(index);
+                operand.id.replace(self.allocations.len());
+                self.allocations.push(MemoryAllocation::Memory(index));
                 return MEM;
             }
             let location = Self::get_register(bitmap).unwrap();
@@ -253,8 +255,9 @@ pub mod amd_win64 {
                 self.allocations[prev_owner] = MemoryAllocation::Memory(pos);
             }
             println!("Move {}, {}", self.to_string(prev_owner), s);
-            self.allocations[id] = MemoryAllocation::Register(location);
-            self.registers[location].operand = Some(id);
+            self.registers[location].operand = Some(self.allocations.len());
+            operand.id.replace(self.allocations.len());
+            self.allocations.push(MemoryAllocation::Register(location));
             return self.registers[location].bitmap;
         }
 
@@ -266,16 +269,27 @@ pub mod amd_win64 {
                 }
                 MemoryAllocation::Memory(index) => {
                     self.memory[index] = false;
-                }
-                MemoryAllocation::None => {}
+                },
+                MemoryAllocation::Immediate(..) => {},
+                MemoryAllocation::Hint(_) | MemoryAllocation::None => panic!("Double free")
             }
             self.allocations[id] = MemoryAllocation::None;
+        }
+
+        fn is_free(&self, id : usize) -> bool {
+            match self.allocations[id] {
+                MemoryAllocation::Register(_) | MemoryAllocation::Memory(_) |
+                MemoryAllocation::Immediate(_, _) => false,
+                MemoryAllocation::Hint(_) | MemoryAllocation::None => true
+            }
         }
 
         fn allocation_bitmap(&self, id : usize) -> u64 {
             match self.allocations[id] {
                 MemoryAllocation::Register(i) => self.registers[i].bitmap,
                 MemoryAllocation::Memory(_) => MEM,
+                MemoryAllocation::Immediate(_, bitmap) => bitmap,
+                MemoryAllocation::Hint(_) |
                 MemoryAllocation::None => 0
             }
         }
@@ -294,6 +308,12 @@ pub mod amd_win64 {
                 }
                 MemoryAllocation::Memory(i) => {
                     "mem(".to_owned() + &i.to_string() + ")"
+                },
+                MemoryAllocation::Immediate(i, _) => {
+                  i.to_string()
+                },
+                MemoryAllocation::Hint(_) => {
+                    "Hint".to_string()
                 }
                 MemoryAllocation::None => {
                     "None".to_owned()
@@ -301,151 +321,34 @@ pub mod amd_win64 {
             }
         }
 
-        fn register_zero(&mut self, dest : Rc<RefCell<Operand>>, op : BasicOperation) {
-            let id = dest.borrow().location().unwrap().location;
-            let bitmap = op.dest_bitmap();
-            self.allocate(id, bitmap);
-            println!("{:?} {}", op, self.to_string(id));
-
+        fn allocate_imm(&mut self, operand : &Operand, imm : u64, size : OperandSize) {
+            self.allocations.push(MemoryAllocation::Immediate(imm, size.to_imm()));
+            operand.id.replace(self.allocations.len() - 1);
         }
 
-        fn register_one_local(&mut self, first : Rc<RefCell<Operand>>, dest : Option<Rc<RefCell<Operand>>>, op : BasicOperation, reused : bool) {
-            let bitmap = op.first_bitmap();
-            let first_id = first.borrow().location().unwrap().location;
-
-            if reused && dest.is_some() {
-                let dest_id = dest.as_ref().unwrap().borrow().location().unwrap().location;
-                self.allocate(dest_id, bitmap);
-                println!("Move {}, {}", self.to_string(dest_id), self.to_string(first_id));
-                // Add Move
-            } else {
-                let prev_alloc = self.allocation_bitmap(first_id);
-                if bitmap & prev_alloc == 0 {
-                    // Add Move
-                    let s = self.to_string(first_id);
-                    self.free(first_id);
-                    self.allocate(first_id, bitmap);
-                    println!("Move {}, {}", self.to_string(first_id), s);
-
-                }
-                if let Some(dest) = &dest {
-                    dest.borrow_mut().location_mut().unwrap().location = first_id;
-                }
-            }
-            if let Some(dest) = &dest {
-                println!("{:?}, {}, {}", op, self.to_string(dest.borrow().location().unwrap().location), self.to_string(first_id));
-            } else {
-                println!("{:?}, {}", op, self.to_string(first_id));
-            }
-
-            if dest.is_none() && !reused {
-                self.free(first_id);
-            }
-        }
-
-        fn register_one_imm(&mut self, dest : Option<Rc<RefCell<Operand>>>, op : BasicOperation, imm : u64) {
-            if let Some(dest) = dest {
-                let bitmap = op.first_bitmap();
-                let id = dest.borrow().location().unwrap().location;
-                if let MemoryAllocation::None = self.allocations[id] {
-                    self.allocate(id, bitmap);
+        fn allocate_hint(&mut self, operand : &Operand, hint : u64) -> bool {
+            if let MemoryAllocation::None = self.allocations[operand.id.get()] {
+                self.allocations.push(MemoryAllocation::Hint(hint));
+                operand.id.replace(self.allocations.len() - 1);
+                return true;
+            } else if let MemoryAllocation::Hint(ref mut prev_hint) = self.allocations[operand.id.get()] {
+                if *prev_hint & hint == 0 {
+                    self.allocations.push(MemoryAllocation::Hint(hint));
+                    operand.id.replace(self.allocations.len() - 1);
                 } else {
-                    println!("{:?}, {:?}, {:?}", op, &self.allocations, id);
-                    panic!("Dest should not be allocated")
+                    *prev_hint &= hint;
                 }
-                println!("{:?}, {}, {}", op, self.to_string(id), imm);
+                return true;
             }
+            return false;
         }
 
-        fn register_two_local(&mut self, first : Rc<RefCell<Operand>>, second : Rc<RefCell<Operand>>, dest : Option<Rc<RefCell<Operand>>>, op : BasicOperation, reused_first : bool, reused_second : bool) {
-            let first_bitmap_allowed = op.first_bitmap();
-            let first_id = first.borrow().location().unwrap().location;
-            let second_id = second.borrow().location().unwrap().location;
-            let mut first_bitmap;
-            if reused_first && dest.is_some() {
-                let dest_id = dest.as_ref().unwrap().borrow().location().unwrap().location;
-                first_bitmap = self.allocate(dest_id, first_bitmap_allowed);
-                println!("Move {}, {}", self.to_string(dest_id), self.to_string(first_id));
-                // Add Move
-            } else {
-                first_bitmap = self.allocation_bitmap(first_id);
-                if first_bitmap & first_bitmap_allowed == 0 {
-                    // Add Move
-                    let s = self.to_string(first_id);
-                    self.free(first_id);
-                    first_bitmap = self.allocate(first_id, first_bitmap_allowed);
-                    println!("Move {}, {}", self.to_string(first_id), s);
-                }
-                if let Some(dest) = &dest {
-                    dest.borrow_mut().location_mut().unwrap().location = first_id;
+        fn propagate_hint(&mut self, source : &Operand, dest : &Operand) {
+            if let MemoryAllocation::None = self.allocations[dest.id.get()] {
+                if let MemoryAllocation::Hint(_) = self.allocations[source.id.get()] {
+                    dest.id.replace(source.id.get());
                 }
             }
-            let second_bitmap_allowed = op.second_bitmap(first_bitmap);
-            if self.allocation_bitmap(second_id) & second_bitmap_allowed == 0 {
-                let s = self.to_string(second_id);
-                self.free(second_id);
-                self.allocate(second_id, second_bitmap_allowed);
-                println!("Move {}, {}", self.to_string(second_id), s);
-            }
-            if let Some(dest) = &dest {
-                println!("{:?}, {}, {}, {}", op, self.to_string(dest.borrow().location().unwrap().location), self.to_string(first_id), self.to_string(second_id));
-            } else {
-                println!("{:?}, {}, {}", op, self.to_string(first_id), self.to_string(second_id));
-            }
-
-
-            if dest.is_none() && !reused_first {
-                self.free(first_id);
-            }
-            if !reused_second {
-                self.free(second_id);
-            }
-        }
-
-        fn register_two_imm(&mut self, first : Rc<RefCell<Operand>>, dest : Option<Rc<RefCell<Operand>>>, op : BasicOperation, reused : bool, imm : u64) {
-            let bitmap = op.first_bitmap();
-            let first_id = first.borrow().location().unwrap().location;
-
-            if reused && dest.is_some() {
-                let dest_id = dest.as_ref().unwrap().borrow().location().unwrap().location;
-                self.allocate(dest_id, bitmap);
-                println!("Move {}, {}", self.to_string(dest_id), self.to_string(first_id));
-                // Add Move
-            } else {
-                let prev_alloc = self.allocation_bitmap(first_id);
-                if bitmap & prev_alloc == 0 {
-                    // Add Move
-                    let s = self.to_string(first_id);
-                    self.free(first_id);
-                    self.allocate(first_id, bitmap);
-                    println!("Move {}, {}", self.to_string(first_id), s);
-                }
-                if let Some(dest) = &dest {
-                    dest.borrow_mut().location_mut().unwrap().location = first_id;
-                }
-            }
-            if let Some(dest) = &dest {
-                println!("{:?}, {}, {}, {}", op, self.to_string(dest.borrow().location().unwrap().location), self.to_string(first_id), imm);
-            } else {
-                println!("{:?}, {}, {}", op, self.to_string(first_id), imm);
-            }
-
-            if dest.is_none() && !reused {
-                self.free(first_id);
-            }
-        }
-    }
-
-
-    #[derive(Copy, Clone, Debug)]
-    struct Location {
-        location : usize, // Location in register allocation
-        size : OperandSize
-    }
-
-    impl Location {
-        fn new(location : usize, size : OperandSize) -> Location {
-            Location { location, size }
         }
     }
 
@@ -458,63 +361,40 @@ pub mod amd_win64 {
         }
     }
 
-    #[derive(Debug, Clone)]
-    enum Operands {
-        Zero, One(Rc<RefCell<Operand>>), Two(Rc<RefCell<Operand>>, Rc<RefCell<Operand>>),
-    }
-
     #[derive(Debug)]
-    enum Operand {
-        Local {location : Location, uses : usize, used : usize},
-        Immediate {value : u64, size : OperandSize}
+    struct Operand {
+        id : Cell<usize>, // Index of allocated MemoryLocation
+        last_use : Cell<usize>, // Index of the last usage of this operand in instructions vector
+        location : Cell<u64>, // Hint where this operand wants to be located
+        size : OperandSize
     }
 
     impl Operand {
-        fn local(location : Location) -> Operand {
-            Operand::Local {
-                location,
-                uses: 0,
-                used : 0
+        fn new(id : usize, location : u64, size : OperandSize) -> Operand {
+            Operand {
+                id : Cell::new(id), location : Cell::new(location), last_use : Cell::new(0), size
             }
         }
 
-        fn add_use(&mut self) -> bool {
-            match self {
-                Operand::Local {ref mut used, uses, .. } => {
-                    *used += 1;
-                    uses > used
-                },
-                Operand::Immediate { .. } => {
-                    false
-                }
-            }
+        fn local(size : OperandSize) -> Operand {
+            Self::new(0, MEM_GEN_REG, size)
         }
 
-        fn location(&self) -> Option<&Location> {
-            match self {
-                Operand::Local { location, .. } => Some(location),
-                Operand::Immediate { .. } => None,
-            }
-        }
-
-        fn location_mut(&mut self) -> Option<&mut Location> {
-            match self {
-                Operand::Local {location, ..} => Some(location),
-                _ => None
-            }
+        fn add_use(&self, index : usize) {
+            self.last_use.replace(index);
         }
     }
 
     #[derive(Debug, Clone)]
-    struct Instruction {
+    struct Instruction <'a> {
         operator : BasicOperation,
-        operands : Operands,
-        dest : Option<Rc<RefCell<Operand>>> // Many instructions have same dest as first operand, but they need to be kept separate in case the next usage of dest is incompatible.
+        operands : Vec<&'a Operand>,
+        dest : Option<&'a Operand> // Many instructions have same dest as first operand, but they need to be kept separate in case the next usage of dest is incompatible.
     }
 
 
-    impl Instruction {
-        fn new(operator : BasicOperation, operands : Operands, dest : Option<Rc<RefCell<Operand>>>) -> Instruction {
+    impl <'a> Instruction<'a> {
+        fn new(operator : BasicOperation, operands : Vec<&'a Operand>, dest : Option<&'a Operand>) -> Instruction<'a> {
             Instruction {
                 operator, operands, dest
             }
@@ -523,72 +403,44 @@ pub mod amd_win64 {
 
     struct Compiler<'a> {
         statements : &'a Vec<StatementData<'a>>,
-        instr : Vec<Instruction>,
-        operands : Vec<Rc<RefCell<Operand>>>,
-        memory_locations : usize
+        instr : Vec<Instruction<'a>>,
+        invalidations : Vec<(usize, u64)>,
+        operands : Vec<&'a Operand>,
+        arena : &'a Bump,
+        register_state : RegisterState
     }
 
     impl <'a> Compiler<'a> {
-
-        fn new<'b> (statements : &'a Vec<StatementData>, vars: &'b HashMap<String, &Variable>) -> Compiler<'a> {
-            let mut memory_locations = 0;
+        fn new<'b> (arena : &'a Bump, statements : &'a Vec<StatementData>, vars: &'b HashMap<String, &Variable>) -> Compiler<'a> {
+            let register_state = RegisterState::new();
             let operands = vars.iter().enumerate().map(|(i, (_, v))|{
                 v.id.replace(Some(i));
-                memory_locations +=1;
-                Rc::new(RefCell::new(Operand::local(Location::new(memory_locations, type_size(v.var_type)))))
+                &*arena.alloc(Operand::local(type_size(v.var_type)))
             }).collect();
             Compiler {
-                statements, instr : Vec::new(),
-                operands,
-                memory_locations
+                statements, instr : Vec::new(), invalidations : Vec::new(),
+                operands, arena, register_state
             }
         }
 
         fn compile_statements(&mut self) {
             for statement in self.statements {
                 match &statement.statement { Statement::Assignment { var, expr } => {
-                    self.convert_assigment(var.id.borrow().unwrap(), &expr);
+                    self.convert_assigment(*var, &expr);
                 }}
             }
 
             self.assign_registers();
         }
 
-        fn new_location(&mut self, size : OperandSize) -> Location {
-            self.memory_locations += 1;
-            Location::new(self.memory_locations - 1, size)
+        fn new_operand(&mut self, location : u64, size : OperandSize) -> Operand {
+            Operand::new(0, location, size)
         }
 
-        fn fix_imm(&mut self, locations : &mut Vec<Rc<RefCell<Operand>>>, first : &mut usize, second : &mut usize, op : BasicOperation) {
-            if let Operand::Immediate { size,.. } = locations[*first].clone().borrow().deref() {
-                if op.is_symmetric() && locations[*first].borrow().location().is_some() {
-                    (*first, *second) = (*second, *first);
-                } else {
-                    let new = Rc::new(RefCell::new(Operand::local(self.new_location(*size))));
-                    self.memory_locations += 1;
-                    self.instr.push(Instruction::new(
-                        BasicOperation::Move, Operands::One(locations[*first].clone()), Some(new.clone())
-                    ));
-                    locations[*first] = new;
-                }
-            }
-            if let Operand::Immediate { size, ..} = locations[*second].clone().borrow().deref() {
-                if !op.imm_2(*size) {
-                    let new = Rc::new(RefCell::new(Operand::local(self.new_location(*size))));
-                    self.instr.push(Instruction::new(
-                        BasicOperation::Move, Operands::One(locations[*second].clone()), Some(new.clone())
-                    ));
-                    locations[*second] = new;
-                }
-            }
-        }
-
-        fn convert_dual_operator(&mut self, locations : &mut Vec<Rc<RefCell<Operand>>>, mut first : usize, mut second : usize, size : OperandSize, t : Type, op : DualOperator) {
+        fn convert_dual_operator(&mut self, locations : &mut Vec<&'a Operand>, mut first : usize, mut second : usize, size : OperandSize, t : Type, op : DualOperator) {
             if op.is_cmp() {
-                self.fix_imm(locations, &mut first, &mut second, BasicOperation::Cmp);
                 self.instr.push(Instruction::new(BasicOperation::Cmp,
-                                                 Operands::Two(locations[first].clone(),
-                                                               locations[second].clone()),
+                                                 vec![locations[first], locations[second]],
                                                  None));
                 let basic_operator = match op {
                     DualOperator::Equal => BasicOperation::SetE,
@@ -599,164 +451,159 @@ pub mod amd_win64 {
                     DualOperator::Lesser => if t.is_signed() {BasicOperation::SetL } else {BasicOperation::SetB},
                     _ => unreachable!("Not is_cmp")
                 };
-                let new = Rc::new(RefCell::new(Operand::local(self.new_location(OperandSize::BYTE))));
-                locations.push(new.clone());
-                self.instr.push(Instruction::new(basic_operator, Operands::Zero, Some(new)));
+                let dest =  self.arena.alloc(Operand::local(size));
+                let oper = self.arena.alloc(Operand::local(size));
+                locations.push(dest);
+                self.instr.push(Instruction::new(basic_operator, vec![oper], Some(dest)));
             } else {
-                let (location, op) = match op {
-                    DualOperator::Divide =>
-                        (self.new_location(size), if t.is_signed() {BasicOperation::IDiv } else {BasicOperation::Div }),
-                    DualOperator::Multiply => if t.is_signed() {
-                        (self.new_location(size), BasicOperation::IMul)
-                    } else {
-                        (self.new_location(size), BasicOperation::Mul)
+                let operator = match op {
+                    DualOperator::Divide => {
+                        self.invalidations.push((self.instr.len(), RDX));
+                        if t.is_signed() {BasicOperation::IDiv } else {BasicOperation::Div }
                     },
-                    DualOperator::Minus => (self.new_location(size), BasicOperation::Sub),
-                    DualOperator::Plus => (self.new_location(size), BasicOperation::Add),
-                    DualOperator::BoolAnd => (self.new_location(size), BasicOperation::And),
-                    DualOperator::BoolOr => (self.new_location(size), BasicOperation::Or),
+                    DualOperator::Multiply => if t.is_signed() { BasicOperation::IMul } else {
+                        self.invalidations.push((self.instr.len(), RDX));
+                        BasicOperation::Mul
+                    },
+                    DualOperator::Minus => BasicOperation::Sub,
+                    DualOperator::Plus => BasicOperation::Add,
+                    DualOperator::BoolAnd => BasicOperation::And,
+                    DualOperator::BoolOr => BasicOperation::Or,
                     _ => unreachable!("Covered by is_cmp")
                 };
-                self.fix_imm(locations, &mut first, &mut second, op);
-                let new = Rc::new(RefCell::new(Operand::local(location)));
-                locations.push(new.clone());
+                let new = self.arena.alloc(Operand::local(size));
+                locations.push(new);
                 self.instr.push(Instruction::new(
-                    op, Operands::Two(locations[first].clone(), locations[second].clone()),
-                    Some(new)
+                    operator, vec![locations[first], locations[second]], Some(new)
                 ));
             }
         }
 
-        fn convert_single_operator(&mut self, locations : &mut Vec<Rc<RefCell<Operand>>>, mut expr : usize, op : SingleOperator) {
+        fn convert_single_operator(&mut self, locations : &mut Vec<&'a Operand>, mut expr : usize, op : SingleOperator) {
             match op {
                 SingleOperator::Not => {
-                    if let Operand::Immediate {size, ..} = locations[expr].clone().borrow().deref() {
-                        if !BasicOperation::Xor.imm_2(*size) {
-                            let new = Rc::new(RefCell::new(Operand::local(self.new_location(*size))));
-                            self.instr.push(Instruction::new(
-                                BasicOperation::Move, Operands::One(locations[expr].clone()), Some(new.clone())
-                            ));
-                            locations[expr] = new;
-                        }
-                    }
-                    let new = Rc::new(RefCell::new(Operand::local(self.new_location(OperandSize::BYTE))));
-                    let new2 = Rc::new(RefCell::new(Operand::Immediate {value : 1, size : OperandSize::BYTE}));
-                    locations.push(new.clone());
+                    let new = self.arena.alloc(Operand::local(OperandSize::BYTE));
+                    let new2 = self.arena.alloc(Operand::new(0, IMM8, OperandSize::BYTE));
+                    self.register_state.allocate_imm(new2, 1, OperandSize::BYTE);
+                    locations.push(new);
                     self.instr.push(Instruction::new(
                         BasicOperation::Xor,
-                        Operands::Two(locations[expr].clone(), new2),
-                        Some(new)));
+                        vec![locations[expr], new2], Some(new))
+                    );
                 }
                 SingleOperator::Pass => unreachable!("Should not exist at this point.")
             }
         }
 
-        fn convert_assigment(&mut self, dest : usize, expr : &Vec<ExpressionData>) {
+        fn convert_assigment(&mut self, dest : &Variable, expr : &Vec<ExpressionData>) {
             let mut locations = Vec::with_capacity(expr.len());
             let prev_len = self.instr.len();
-            for (i, e) in expr.iter().enumerate() {
+            for e in expr.iter() {
                 match e.expression {
                     Expression::Variable(v) => {
                         let id = v.id.borrow().unwrap();
                         locations.push(self.operands[id].clone());
                     },
                     Expression::Operator { mut first, operator, mut second } => {
-                        if let Operand::Local {ref mut uses, .. } = *locations[first].borrow_mut() {
-                            *uses += 1;
-                        }
-                        if let Operand::Local {ref mut uses, .. } = *locations[second].borrow_mut() {
-                            *uses += 1;
-                        }
+                        locations[first].add_use(self.instr.len());
+                        locations[second].add_use(self.instr.len());
                         let size = type_size(e.t);
                         self.convert_dual_operator(&mut locations, first, second, size, expr[first].t, operator);
                     }
                     Expression::SingleOperator { operator, expr } => {
-                        if let Operand::Local {ref mut uses, .. } = *locations[expr].borrow_mut() {
-                            *uses += 1;
-                        }
+                        locations[expr].add_use(self.instr.len());
                         self.convert_single_operator(&mut locations, expr, operator);
                     }
                     Expression::IntLiteral(val) => {
-                        let new = Rc::new(RefCell::new(Operand::Immediate {value : val, size : type_size(e.t)}));
-                        locations.push(new.clone());
+                        let new = self.arena.alloc(Operand::new(0, type_size(e.t).to_imm(), type_size(e.t)));
+                        self.register_state.allocate_imm(new, val, type_size(e.t));
+                        locations.push(new);
                     }
                     Expression::BoolLiteral(b) => {
-                        let new = Rc::new(RefCell::new(Operand::Immediate {value : if b {1} else {0}, size : OperandSize::BYTE}));
+                        let new = self.arena.alloc(Operand::new(0, IMM8, OperandSize::BYTE));
+                        self.register_state.allocate_imm(new, if b {1} else {0}, OperandSize::BYTE);
                         locations.push(new);
                     }
                     Expression::None => unreachable!("Should not exist ever.")
                 };
             }
             if prev_len ==  self.instr.len() { // Whole expression was only a variable or immediate value.
+                let operand = *locations.last().unwrap();
+                operand.add_use(self.instr.len());
+                let first = self.arena.alloc(Operand::local(type_size(dest.var_type)));
                 let instruction = Instruction::new(BasicOperation::Move,
-                    Operands::One(locations.last().unwrap().clone()), Some(self.operands[dest].clone()));
+                            vec![first, operand], Some(self.operands[dest.id.borrow().unwrap()]));
                 self.instr.push(instruction);
             } else if let Some(instruction) =  self.instr.last_mut() {
-                //operands[instruction.dest.unwrap()] = Operand::None;
-                instruction.dest = Some(self.operands[dest].clone());
+                instruction.dest = Some(self.operands[dest.id.borrow().unwrap()]);
             }
         }
 
         fn assign_registers(&mut self) {
-            let mut register_state = RegisterState::new(self.memory_locations);
-            for i in &self.instr {
-                println!("{:?}, {:?}", i.dest, i.operator);
+            for instruction in self.instr.iter() { // Merge dest and first operand
+                for (i, &operand) in instruction.operands.iter().enumerate() {
+                    let hint = instruction.operator.bitmap_hint(i);
+                    self.register_state.allocate_hint(operand, hint);
+                }
+                if let (Some(dest), &first) = (instruction.dest, instruction.operands.first().unwrap()) {
+                    self.register_state.propagate_hint(first, dest);
+                }
             }
-            for instruction in &mut self.instr {
-                match &instruction.operands {
-                    Operands::Zero => {
-                        register_state.register_zero(instruction.dest.clone().unwrap(), instruction.operator);
-                    }
-                    Operands::One(first) => {
-                        let reused = first.borrow_mut().add_use();
-                        match (first.borrow().deref(), &instruction.dest) {
-                            (Operand::Local { used, uses, .. }, Some(dest)) => {
-                                register_state.register_one_local(first.clone(), Some(dest.clone()), instruction.operator, reused);
-                            }
-                            (Operand::Immediate { value, .. }, Some(dest)) => {
-                                register_state.register_one_imm(Some(dest.clone()), instruction.operator, *value);
-                            }
-                            (Operand::Local { used, uses, .. }, None) => {
-                                register_state.register_one_local(first.clone(), None, instruction.operator, reused);
-                            }
-                            (Operand::Immediate { value, ..  }, None) => {
-                                register_state.register_one_imm(None, instruction.operator, *value);
-                            }
-                        }
 
-                    }
-                    Operands::Two(first, second) => {
-                        let reused_first = first.borrow_mut().add_use();
-                        let reused_second = second.borrow_mut().add_use();
-                        if let Operand::Local {..} = first.borrow().deref() {
-                            match (second.borrow().deref(), &instruction.dest) {
-                                (Operand::Local {..}, Some(dest)) => {
-                                    register_state.register_two_local(first.clone(), second.clone(), Some(dest.clone()), instruction.operator, reused_first, reused_second);
-                                }
-                                (Operand::Immediate {value, ..}, Some(dest)) => {
-                                   register_state.register_two_imm(first.clone(), Some(dest.clone()), instruction.operator, reused_first, *value);
-                                }
-                                (Operand::Local {..}, None) => {
-                                    register_state.register_two_local(first.clone(), second.clone(), None, instruction.operator, reused_first, reused_second);
-                                }
-                                (Operand::Immediate {value, ..}, None) => {
-                                    register_state.register_two_imm(first.clone(), None, instruction.operator, reused_first, *value);
-                                }
+            for (index, instruction) in self.instr.iter_mut().enumerate() {
+                let destroyed = instruction.operator.destroyed();
+                let mut bitmap = 1;
+                for (i, operand) in instruction.operands.iter_mut().enumerate() {
+                    bitmap = instruction.operator.next_bitmap(
+                        bitmap, i
+                    );
 
-                            }
+                    if self.register_state.is_free(operand.id.get()) {
+                        self.register_state.allocate(*operand, bitmap);
+                    }
+                    let allocation_bitmap = self.register_state.allocation_bitmap(operand.id.get());
+                    if operand.last_use.get() > index && destroyed & (1 << i) != 0 || allocation_bitmap & bitmap == 0{
+                        let new = self.arena.alloc(Operand::local(operand.size));
+                        self.register_state.allocate(new, bitmap);
+                        println!("Move0 {}, {}", self.register_state.to_string(new.id.get()), self.register_state.to_string(operand.id.get()));
+                        *operand = new;
+                        // Add move
+                    }
+                    bitmap = self.register_state.allocation_bitmap(operand.id.get());
+                }
+                print!("{:?}", instruction.operator);
+                for &o in instruction.operands.iter() {
+                    print!(" {}", self.register_state.to_string(o.id.get()));
+                }
+                println!();
+                if let Some(dest) = instruction.dest {
+                    if self.register_state.is_free(dest.id.get()) {
+                        if dest.last_use.get() <= index {
+                            self.register_state.free(instruction.operands.first().unwrap().id.get());
                         } else {
-                            unreachable!("Should always be local because ims are fixed before this");
+                            dest.id.replace(instruction.operands.first().unwrap().id.get());
                         }
-
+                    } else {
+                        println!("Move1 {}, {}", self.register_state.to_string(dest.id.get()), self.register_state.to_string(instruction.operands.first().unwrap().id.get()));
+                        //Add move
+                    }
+                } else if let Some(&first) = instruction.operands.first() {
+                    if first.last_use.get() <= index {
+                        self.register_state.free(first.id.get());
+                    }
+                }
+                for &operand in &instruction.operands[1..] { // Nope.., first == dest probably
+                    if operand.last_use.get() <= index {
+                        self.register_state.free(operand.id.get());
                     }
                 }
             }
         }
     }
 
-    pub fn compile_statements(statements : &Vec<StatementData>, vars : &HashMap<String, &parser::Variable>)  {
+    pub fn compile_statements(arena : &Bump, statements : &Vec<StatementData>, vars : &HashMap<String, &parser::Variable>)  {
 
-        let mut compiler = Compiler::new(statements, vars);
+        let mut compiler = Compiler::new(arena, statements, vars);
 
         compiler.compile_statements();
 
@@ -765,27 +612,12 @@ pub mod amd_win64 {
         }
 
         for (i, o ) in compiler.instr.iter().enumerate() {
-            let out = |index : Rc<RefCell<Operand>>| match index.borrow().deref() {
-                Operand::Local {..} => vars.iter()
-                    .find(|(s, &v)| Rc::ptr_eq(&compiler.operands[v.id.borrow().unwrap()].clone(), &index.clone()))
-                    .map(|(s, _)| s.clone()).unwrap_or("Pos:".to_string() + &(index.as_ptr() as usize).to_string()),
-                Operand::Immediate {value, ..} => value.to_string(),
-                _ => unreachable!("")
+            let out = |index : &Operand| {
+                compiler.register_state.to_string(index.id.get())
             };
-            if let Operands::Two(i1, i2) = &o.operands {
-                let out1 = out(i1.clone());
-                let out2 = out(i2.clone());
-                let dest = o.dest.clone().map(|i| out(i)).unwrap_or("None".to_string());
-                println!("{}, {:?}, {}, {}, => {}", i, o.operator, out1, out2, dest);
-
-            } else if let Operands::One(i1) = &o.operands {
-                let out1 = out(i1.clone());
-                let dest = o.dest.clone().map(|i| out(i)).unwrap_or("None".to_string());
-                println!("{}, {:?}, {}, => {}", i, o.operator, out1, dest);
-            } else{
-                let dest = o.dest.clone().map(|i| out(i)).unwrap_or("None".to_string());
-                println!("{}, {:?}, => {:?}", i, o.operator, dest);
-            }
+            let oper = o.operands.iter().map(|op| *op).map(out).collect::<Vec<String>>();
+            let dest = o.dest.clone().map(|i| out(i)).unwrap_or("None".to_string());
+            //println!("{}, {:?}, {:?}, => {}", i, o.operator,oper, dest);
 
         }
 

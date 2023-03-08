@@ -414,7 +414,7 @@ fn parse_program(mut parser : Parser) -> Result<Program, ParseError> {
     for statement in &mut statements {
         parser.type_validate(statement)?;
     }
-    amd_win64::compile_statements(&statements, &parser.variables);
+    amd_win64::compile_statements(parser.arena, &statements, &parser.variables);
     println!("{:?}", parser.variables);
     Ok(Program {
         statements
