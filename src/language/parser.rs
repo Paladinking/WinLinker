@@ -3,11 +3,11 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter, Debug};
 use bumpalo::Bump;
 use std::str::FromStr;
+use crate::language::amd_win64::compiler::InstructionBuilder;
 use crate::language::expression_builder::ExpressionBuilder;
 use crate::language::operator::{DualOperator, SingleOperator};
 use crate::language::types::Type;
 use crate::language::parse_error::{ParseError, ParseErrorType};
-use crate::language::target::amd_win64;
 
 
 #[derive(Debug)]
@@ -414,7 +414,8 @@ fn parse_program(mut parser : Parser) -> Result<Program, ParseError> {
     for statement in &mut statements {
         parser.type_validate(statement)?;
     }
-    amd_win64::compile_statements(parser.arena, &statements, &parser.variables);
+    InstructionBuilder::new(parser.arena, &parser.variables)
+        .with(&statements).compile();
     println!("{:?}", parser.variables);
     Ok(Program {
         statements
