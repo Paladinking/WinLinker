@@ -2,6 +2,7 @@ pub mod amd_win64 {
     use std::cell::{Cell};
     use crate::language::parser::{Statement, Expression, ExpressionData, StatementData, Variable};
     use std::collections::HashMap;
+    use std::env::var;
     use bumpalo::Bump;
     use crate::language::operator::{DualOperator, SingleOperator};
     use crate::language::types::Type;
@@ -9,7 +10,7 @@ pub mod amd_win64 {
     #[derive(Debug, Copy, Clone)]
     enum BasicOperation {
         IMul, Mul, Add, Sub, IDiv, Div, Mov, Push, Pop, Cmp, SetE, SetNe, SetA, SetB, SetAE, SetBE, SetG, SetL,
-        SetGE, SetLE, And, Or, Xor
+        SetGE, SetLE, And, Or, Xor, MovRet
     }
 
     impl BasicOperation {
@@ -24,7 +25,7 @@ pub mod amd_win64 {
                 BasicOperation::Cmp | BasicOperation::SetE | BasicOperation::SetNe |
                 BasicOperation::SetA | BasicOperation::SetB | BasicOperation::SetAE |
                 BasicOperation::SetBE | BasicOperation::SetG | BasicOperation::SetL |
-                BasicOperation::SetGE | BasicOperation::SetLE => false,
+                BasicOperation::SetGE | BasicOperation::SetLE | BasicOperation::MovRet => false,
             }
         }
 
@@ -44,7 +45,7 @@ pub mod amd_win64 {
                 BasicOperation::Pop | BasicOperation::SetE | BasicOperation::SetNe |
                 BasicOperation::SetA | BasicOperation::SetB | BasicOperation::SetAE |
                 BasicOperation::SetBE | BasicOperation::SetG | BasicOperation::SetL |
-                BasicOperation::SetGE | BasicOperation::SetLE => 0,
+                BasicOperation::SetGE | BasicOperation::SetLE | BasicOperation::MovRet => 0,
 
                 BasicOperation::IMul | BasicOperation::Mul | BasicOperation::Add |
                 BasicOperation::Sub | BasicOperation::IDiv | BasicOperation::Div |
@@ -54,7 +55,8 @@ pub mod amd_win64 {
 
         fn first_bitmap(&self) -> u64 {
             match self {
-                BasicOperation::Div | BasicOperation::IDiv | BasicOperation::Mul => RAX,
+                BasicOperation::Div | BasicOperation::IDiv |
+                BasicOperation::Mul | BasicOperation::MovRet => RAX,
 
                 BasicOperation::IMul | BasicOperation::Add | BasicOperation::Sub |
                 BasicOperation::Mov | BasicOperation::And | BasicOperation::Or |
@@ -78,7 +80,7 @@ pub mod amd_win64 {
                 BasicOperation::Push | BasicOperation::Pop | BasicOperation::SetE | BasicOperation::SetNe |
                 BasicOperation::SetA | BasicOperation::SetB | BasicOperation::SetAE | BasicOperation::SetBE |
                 BasicOperation::SetG | BasicOperation::SetL | BasicOperation::SetGE |
-                BasicOperation::SetLE => panic!("No second operand")
+                BasicOperation::SetLE | BasicOperation::MovRet => panic!("No second operand")
             }
         }
 
@@ -113,12 +115,12 @@ pub mod amd_win64 {
     }
 
     struct Register {
-       bitmap : u64, index : usize, operand : Option<usize>
+       bitmap : u64, operand : Option<usize>
     }
 
     impl Register {
-        pub fn new_general(bitmap : u64, index : usize) -> Register {
-            Register {bitmap, index, operand : None}
+        pub fn new_general(bitmap : u64) -> Register {
+            Register {bitmap, operand : None}
         }
     }
 
@@ -139,11 +141,11 @@ pub mod amd_win64 {
     const RDI : u64 = 2_u64.pow(7);
     const RBP : u64 = 2_u64.pow(8);
     const RBX : u64 = 2_u64.pow(9);
-    const R11 : u64 = 2_u64.pow(10);
-    const R10 : u64 = 2_u64.pow(11);
-    const R9 : u64 = 2_u64.pow(12);
-    const R8 : u64 = 2_u64.pow(13);
-    const RAX : u64 = 2_u64.pow(14);
+    const RAX : u64 = 2_u64.pow(10);
+    const R11 : u64 = 2_u64.pow(11);
+    const R10 : u64 = 2_u64.pow(12);
+    const R9 : u64 = 2_u64.pow(13);
+    const R8 : u64 = 2_u64.pow(14);
     const RDX : u64 = 2_u64.pow(15);
     const RCX : u64 = 2_u64.pow(16);
 
@@ -170,21 +172,21 @@ pub mod amd_win64 {
 
         fn new() -> RegisterState {
             let registers = vec![
-               Register::new_general(RCX, 0),
-               Register::new_general(RDX, 1),
-               Register::new_general(RAX, 2),
-               Register::new_general(R8, 3),
-               Register::new_general(R9, 4),
-               Register::new_general(R10, 5),
-               Register::new_general(R11, 6),
-               Register::new_general(RBX, 7),
-               Register::new_general(RBP, 8),
-               Register::new_general(RDI, 9),
-               Register::new_general(RSI, 10),
-               Register::new_general(R12, 11),
-               Register::new_general(R13, 12),
-               Register::new_general(R14, 13),
-               Register::new_general(R15, 14)
+               Register::new_general(RCX),
+               Register::new_general(RDX),
+               Register::new_general(RAX),
+               Register::new_general(R8),
+               Register::new_general(R9),
+               Register::new_general(R10),
+               Register::new_general(R11),
+               Register::new_general(RBX),
+               Register::new_general(RBP),
+               Register::new_general(RDI),
+               Register::new_general(RSI),
+               Register::new_general(R12),
+               Register::new_general(R13),
+               Register::new_general(R14),
+               Register::new_general(R15)
             ];
             let allocations = vec![MemoryAllocation::None];
             RegisterState {
@@ -230,24 +232,25 @@ pub mod amd_win64 {
         // Potentially inserts a move to free a register, moving it to another
         // register or memory location. The destination of such a move will not be to
         // any location contained in invalidated.
-        fn allocate(&mut self, operand : &Operand, bitmap : u64, invalidated : u64) -> u64 {
-            if let MemoryAllocation::Hint(map) = self.allocations[operand.id.get()] {
-                if let Some(index) = Self::get_register(map & bitmap & self.free_gen) {
-                    self.registers[index].operand = Some(self.allocations.len());
-                    operand.id.replace(self.allocations.len());
-                    self.allocations.push(MemoryAllocation::Register(index));
-                    self.free_gen &= !self.registers[index].bitmap;
-                    return self.registers[index].bitmap;
-                }
+        fn allocate(&mut self, operand : &Operand, bitmap : u64, invalidated : u64, invalid_soon : u64) -> u64 {
+            fn allocate_reg(state : &mut RegisterState, index : usize, operand : &Operand) -> u64 {
+                state.registers[index].operand = Some(state.allocations.len());
+                operand.id.replace(state.allocations.len());
+                state.allocations.push(MemoryAllocation::Register(index));
+                state.free_gen &= !state.registers[index].bitmap;
+                return state.registers[index].bitmap;
             }
 
-            let location = Self::get_register(bitmap & self.free_gen);
-            if let Some(index) = location {
-                self.registers[index].operand = Some(self.allocations.len());
-                operand.id.replace(self.allocations.len());
-                self.allocations.push(MemoryAllocation::Register(index));
-                self.free_gen &= !self.registers[index].bitmap;
-                return self.registers[index].bitmap;
+            if let MemoryAllocation::Hint(map) = self.allocations[operand.id.get()] {
+                if let Some(index) = Self::get_register(map & bitmap & self.free_gen & !invalid_soon) {
+                    return allocate_reg(self, index, operand);
+                }
+            }
+            if let Some(index) = Self::get_register(bitmap & self.free_gen & !invalid_soon) {
+                return allocate_reg(self, index, operand);
+            }
+            if let Some(index) = Self::get_register(bitmap & self.free_gen) {
+                return allocate_reg(self, index, operand);
             }
             if bitmap & MEM != 0 {
                 let index = self.get_memory();
@@ -260,7 +263,6 @@ pub mod amd_win64 {
             let s = self.to_string(prev_owner);
             if let Some(reg) = Self::get_register(self.free_gen & !self.registers[location].bitmap & !invalidated) {
                 // Insert Move
-
                 self.allocations[prev_owner] = MemoryAllocation::Register(reg);
                 self.registers[reg].operand = Some(prev_owner);
                 self.free_gen &= !self.registers[reg].bitmap;
@@ -270,10 +272,7 @@ pub mod amd_win64 {
                 self.allocations[prev_owner] = MemoryAllocation::Memory(pos);
             }
             println!("Move {}, {}", self.to_string(prev_owner), s);
-            self.registers[location].operand = Some(self.allocations.len());
-            operand.id.replace(self.allocations.len());
-            self.allocations.push(MemoryAllocation::Register(location));
-            return self.registers[location].bitmap;
+            return allocate_reg(self, location, operand);
         }
 
         fn free(&mut self, id : usize) {
@@ -446,7 +445,8 @@ pub mod amd_win64 {
         invalidations : Vec<(usize, u64)>,
         operands : Vec<&'a Operand>,
         arena : &'a Bump,
-        register_state : RegisterState
+        register_state : RegisterState,
+        exit_code : usize
     }
 
     impl <'a> Compiler<'a> {
@@ -456,9 +456,10 @@ pub mod amd_win64 {
                 v.id.replace(Some(i));
                 &*arena.alloc(Operand::local(type_size(v.var_type)))
             }).collect();
+            let exit_code = vars.get("exit_code").unwrap().id.borrow().unwrap();
             Compiler {
                 statements, instr : Vec::new(), invalidations : Vec::new(),
-                operands, arena, register_state
+                operands, arena, register_state, exit_code
             }
         }
 
@@ -468,12 +469,11 @@ pub mod amd_win64 {
                     self.convert_assigment(*var, &expr);
                 }}
             }
-
+            let exit = self.operands[self.exit_code];
+            let out = self.arena.alloc(Operand::local(exit.size));
+            exit.last_use.replace(self.instr.len());
+            self.instr.push(Instruction::new(BasicOperation::MovRet, vec![exit], Some(out)));
             self.assign_registers();
-        }
-
-        fn new_operand(&mut self, location : u64, size : OperandSize) -> Operand {
-            Operand::new(0, location, size)
         }
 
         fn convert_dual_operator(&mut self, locations : &mut Vec<&'a Operand>, first : usize, second : usize, size : OperandSize, t : Type, op : DualOperator) {
@@ -497,11 +497,11 @@ pub mod amd_win64 {
             } else {
                 let operator = match op {
                     DualOperator::Divide => {
-                        self.invalidations.push((self.instr.len(), RDX));
+                        self.invalidations.push((self.instr.len(), RDX | RAX));
                         if t.is_signed() {BasicOperation::IDiv } else {BasicOperation::Div }
                     },
                     DualOperator::Multiply => if t.is_signed() { BasicOperation::IMul } else {
-                        self.invalidations.push((self.instr.len(), RDX));
+                        self.invalidations.push((self.instr.len(), RDX | RAX));
                         BasicOperation::Mul
                     },
                     DualOperator::Minus => BasicOperation::Sub,
@@ -566,15 +566,19 @@ pub mod amd_win64 {
                     Expression::None => unreachable!("Should not exist ever.")
                 };
             }
+            let index = dest.id.borrow().unwrap();
+            let new_dest = self.arena.alloc(Operand::local(type_size(dest.var_type)));
+            self.operands[index] = new_dest;
             if prev_len ==  self.instr.len() { // Whole expression was only a variable or immediate value.
                 let operand = *locations.last().unwrap();
                 operand.add_use(self.instr.len());
                 let first = self.arena.alloc(Operand::local(type_size(dest.var_type)));
+
                 let instruction = Instruction::new(BasicOperation::Mov,
-                                                   vec![first, operand], Some(self.operands[dest.id.borrow().unwrap()]));
+                                                   vec![first, operand], Some(new_dest));
                 self.instr.push(instruction);
             } else if let Some(instruction) =  self.instr.last_mut() {
-                instruction.dest = Some(self.operands[dest.id.borrow().unwrap()]);
+                instruction.dest = Some(new_dest);
             }
         }
 
@@ -591,27 +595,36 @@ pub mod amd_win64 {
 
             let mut invalidation = 0;
             for (index, instruction) in self.instr.iter_mut().enumerate() {
-                let mut invalid = 0;
+                let mut invalid_now = 0;
                 if let Some((i, map)) = self.invalidations.get(invalidation) {
                     if *i == index {
-                        invalid = *map;
+                        invalid_now = *map;
                         invalidation += 1;
                     }
                 }
+
                 let destroyed = instruction.operator.destroyed();
                 let mut bitmap = 1;
+                let mut invalid_soon = if let Some(dest) = instruction.dest {
+                     self.invalidations[invalidation..].iter()
+                        .take_while(|(i, _)| *i < dest.last_use.get())
+                        .fold(0, |prev, (_, map), | *map | prev)
+                } else {
+                    0
+                };
+
                 for (i, operand) in instruction.operands.iter_mut().enumerate() {
                     bitmap = instruction.operator.next_bitmap(
                         bitmap, i
                     );
 
                     if self.register_state.is_free(operand.id.get()) {
-                        self.register_state.allocate(*operand, bitmap, invalid);
+                        self.register_state.allocate(*operand, bitmap, invalid_now, invalid_soon);
                     }
                     let allocation_bitmap = self.register_state.allocation_bitmap(operand.id.get());
                     if operand.last_use.get() > index && destroyed & (1 << i) != 0 || allocation_bitmap & bitmap == 0 {
                         let new = self.arena.alloc(Operand::local(operand.size));
-                        let location = self.register_state.allocate(new, bitmap, invalid);
+                        let location = self.register_state.allocate(new, bitmap, invalid_now, invalid_soon);
                         if location != allocation_bitmap {
                             println!("Move0 {}, {}", self.register_state.to_string(new.id.get()), self.register_state.to_string(operand.id.get()));
                         }
@@ -622,13 +635,14 @@ pub mod amd_win64 {
                         *operand = new;
                         // Add move
                     }
+                    invalid_soon = 0;
                     bitmap = self.register_state.allocation_bitmap(operand.id.get());
                     if operand.last_use.get() <= index {
-                        invalid &= !bitmap;
+                        invalid_now &= !bitmap;
                     }
                 }
 
-                self.register_state.invalidate_registers(invalid);
+                self.register_state.invalidate_registers(invalid_now);
                 let mut free = true;
                 if let Some(dest) = instruction.dest {
                     if self.register_state.is_free(dest.id.get()) {
@@ -660,6 +674,7 @@ pub mod amd_win64 {
                 }
 
             }
+            println!("{}", self.register_state.allocations.len());
         }
     }
 
