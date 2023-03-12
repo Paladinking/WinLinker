@@ -1,4 +1,4 @@
-use std::ops::Range;
+use crate::language::amd_win64::instruction::{BasicOperation, InstructionCompiler, OperandType};
 use super::instruction::{Operand, OperandSize};
 
 pub const MEM : u64 = 2_u64.pow(0);
@@ -31,12 +31,12 @@ pub const GEN_REG : u64 = VOL_GEN_REG | NON_VOL_GEN_REG;
 pub const MEM_GEN_REG : u64 = GEN_REG | MEM;
 
 struct Register {
-    bitmap : u64, operand : Option<usize>
+    bitmap : u64, operand : Option<usize>, encoding : u64
 }
 
 impl Register {
-    fn new_general(bitmap : u64) -> Register {
-        Register {bitmap, operand : None}
+    fn new_general(bitmap : u64, encoding : u64) -> Register {
+        Register {bitmap, operand : None, encoding}
     }
 }
 
@@ -44,7 +44,9 @@ pub struct RegisterState {
     registers : Vec<Register>,
     memory : Vec<bool>,
     allocations : Vec<MemoryAllocation>,
-    free_gen : u64
+    free_gen : u64,
+    pub output : Vec<u8>,
+    instruction_compiler : InstructionCompiler
 }
 
 pub fn register_string(bitmap : u64) -> &'static str {
@@ -90,25 +92,26 @@ impl RegisterState {
 
     pub fn new() -> RegisterState {
         let registers = vec![
-            Register::new_general(RCX),
-            Register::new_general(RDX),
-            Register::new_general(RAX),
-            Register::new_general(R8),
-            Register::new_general(R9),
-            Register::new_general(R10),
-            Register::new_general(R11),
-            Register::new_general(RBX),
-            Register::new_general(RBP),
-            Register::new_general(RDI),
-            Register::new_general(RSI),
-            Register::new_general(R12),
-            Register::new_general(R13),
-            Register::new_general(R14),
-            Register::new_general(R15)
+            Register::new_general(RCX, 0b0001),
+            Register::new_general(RDX, 0b0010),
+            Register::new_general(RAX, 0b0000),
+            Register::new_general(R8, 0b1000),
+            Register::new_general(R9, 0b1001),
+            Register::new_general(R10, 0b1010),
+            Register::new_general(R11, 0b1011),
+            Register::new_general(RBX, 0b0011),
+            Register::new_general(RBP, 0b0101),
+            Register::new_general(RDI, 0b0111),
+            Register::new_general(RSI, 0b0110),
+            Register::new_general(R12, 0b1100),
+            Register::new_general(R13, 0b1101),
+            Register::new_general(R14, 0b1110),
+            Register::new_general(R15, 0b1111)
         ];
         let allocations = vec![MemoryAllocation::None];
         RegisterState {
-            registers, memory : Vec::new(), allocations, free_gen : GEN_REG
+            registers, memory : Vec::new(), allocations, free_gen : GEN_REG,
+            instruction_compiler : InstructionCompiler::new(), output : Vec::new()
         }
     }
 
@@ -120,7 +123,10 @@ impl RegisterState {
             RDI => 9, RSI => 10, R12 => 11,
             R13 => 12, R14 => 13, R15 => 14,
             0 => {return None;}
-            _ => panic!("Bad bitmap")
+            _ => {
+                println!("{:b}", bitmap);
+                panic!("Bad bitmap")
+            }
         })
     }
 
@@ -140,6 +146,42 @@ impl RegisterState {
             self.memory.push(true);
         }
         return self.memory.len() - size as usize;
+    }
+
+    fn allocation_type(&self, id : usize) -> OperandType {
+        match self.allocations[id] {
+            MemoryAllocation::Register(_, _) => OperandType::Reg,
+            MemoryAllocation::Memory(_, _) => OperandType::Mem,
+            MemoryAllocation::Immediate(_, _) => OperandType::Imm,
+            MemoryAllocation::Hint(_) | MemoryAllocation::None => panic!("No allocation")
+        }
+    }
+
+    fn get_val(&self, id : usize) -> u64 {
+        match self.allocations[id] {
+            MemoryAllocation::Register(i, _) => {
+                self.registers[i].encoding
+            }
+            MemoryAllocation::Memory(i, _) => {
+                i as u64
+            }
+            MemoryAllocation::Immediate(val, _) => {
+                val
+            }
+            MemoryAllocation::Hint(_) | MemoryAllocation::None => panic!("No allocation")
+        }
+    }
+
+    pub fn compile_instruction(&mut self, operation : BasicOperation, operands : &[&Operand]) {
+        let size = operands[0].size;
+        let mnemonic = operands.iter().rev().fold(0, |m, &operand|
+            m << 8 | (self.allocation_type(operand.id.get()) as u64)
+        );
+        // Need to collect to avoid borrowing self, probably fix.
+        let vals : Vec<u64> = operands.iter().map(|o| self.get_val(o.id.get())).collect();
+        self.instruction_compiler.compile_instruction(
+            operation, size, mnemonic, &mut vals.into_iter(), &mut self.output
+        );
     }
 
     // Allocates a location for operand to a location contained in bitmap.
@@ -181,7 +223,6 @@ impl RegisterState {
         // Steal register from some other allocation
         let location = Self::get_register(bitmap).unwrap();
         let prev_owner = self.registers[location].operand.unwrap();
-        let s = self.to_string(prev_owner);
         // Try moving previous allocation to some other register
         let size = self.allocations[prev_owner].size();
         if let Some(reg) = Self::get_register(self.free_gen & !self.registers[location].bitmap & !invalidated) {
@@ -194,8 +235,16 @@ impl RegisterState {
             let pos = self.get_memory(size);
             self.allocations[prev_owner] = MemoryAllocation::Memory(pos, size);
         }
-        println!("Move {}, {}", self.to_string(prev_owner), s);
-        return allocate_reg(self, location, operand);
+
+        let bitmap = allocate_reg(self, location, operand);
+        let mnemonic = self.allocation_type(prev_owner) as u64 |
+            ((self.allocation_type(operand.id.get()) as u64) << 8);
+        let vals = [self.get_val(prev_owner), self.get_val(operand.id.get())];
+        println!("Mov3 {}, {}", self.to_string(prev_owner), self.to_string(operand.id.get()));
+        self.instruction_compiler.compile_instruction(
+            BasicOperation::Mov, operand.size, mnemonic, &mut vals.into_iter(), &mut self.output
+        );
+        return bitmap;
     }
 
     // Make register / memory used by operand available again.
@@ -223,17 +272,24 @@ impl RegisterState {
             if self.registers[i].bitmap & map != 0 {
                 if let Some(index) = self.registers[i].operand {
                     let s = self.to_string(index);
+                    let mut mnematic = (self.allocation_type(index) as u64) << 8;
+                    let val = self.get_val(index);
                     let size = self.allocations[index].size();
                     // Try to find free register, if none exists use memory
                     if let Some(reg) = Self::get_register(self.free_gen & !map) {
                         self.allocations[index] = MemoryAllocation::Register(reg, size);
                         self.registers[reg].operand = Some(index);
                         self.free_gen &= !self.registers[reg].bitmap;
+                        mnematic |= (OperandType::Reg as u64);
                     } else {
                         let mem = self.get_memory(size);
                         self.allocations[index] = MemoryAllocation::Memory(mem, size);
+                        mnematic |= (OperandType::Mem as u64);
                     }
                     println!("Move3 {}, {}", self.to_string(index), s);
+                    self.instruction_compiler.compile_instruction(BasicOperation::Mov, size, mnematic,
+                    &mut [self.get_val(index), val].into_iter(), &mut self.output);
+
                     self.registers[i].operand = None;
                     self.free_gen |= self.registers[i].bitmap;
                 }

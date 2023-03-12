@@ -27,8 +27,8 @@ impl SingleOperator {
 
 #[derive(Debug, Copy, Clone)]
 pub enum DualOperator {
-    Divide = 0,
-    Multiply = 1,
+    Divide = 1,
+    Multiply = 0,
     Minus = 2,
     Plus = 3,
     // BITWISE : 4 - 8

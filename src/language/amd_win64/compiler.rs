@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use bumpalo::Bump;
-use crate::language::amd_win64::instruction::{BasicOperation, Instruction, Operand, OperandSize};
+use crate::language::amd_win64::instruction::{BasicOperation, Instruction, InstructionCompiler, Operand, OperandSize, OperandType};
 use crate::language::amd_win64::registers::*;
 use crate::language::operator::{DualOperator, SingleOperator};
 use crate::language::parser::{Expression, ExpressionData, Statement, StatementData, Variable};
 use crate::language::types::Type;
+use crate::mnemonic;
 
 // Represents one function
 pub struct ProgramFrame {
@@ -25,7 +26,6 @@ pub struct InstructionBuilder <'a> {
 
 impl <'a> InstructionBuilder <'a> {
     pub fn new<'b> (arena : &'a Bump, vars: &'b HashMap<String, &Variable>) -> InstructionBuilder<'a> {
-        crate::language::amd_win64::instruction::tst();
         let register_state = RegisterState::new();
         let operands = vars.iter().enumerate().map(|(i, (_, v))|{
             v.id.replace(Some(i));
@@ -183,6 +183,7 @@ impl <'a> InstructionBuilder <'a> {
 
         let mut invalidation = 0;
         let mut used_stable = 0_u64;
+
         for (index, instruction) in self.instr.iter_mut().enumerate() {
             let mut invalid_now = 0;
             if let Some((i, map)) = self.invalidations.get(invalidation) {
@@ -209,16 +210,17 @@ impl <'a> InstructionBuilder <'a> {
                 );
 
                 if self.register_state.is_free(operand) {
-                    self.register_state.allocate(*operand, bitmap, invalid_now, invalid_soon);
+                    self.register_state.allocate(*operand, bitmap & MEM_GEN_REG, invalid_now, invalid_soon);
                 }
                 let mut allocation_bitmap = self.register_state.allocation_bitmap(operand);
                 if (operand.used_after(index) && destroyed & (1 << i) != 0) || allocation_bitmap & bitmap == 0 {
                     let new = self.arena.alloc(Operand::local(operand.size));
-                    let location = self.register_state.allocate(new, bitmap, invalid_now, invalid_soon);
+                    let location = self.register_state.allocate(new, bitmap & MEM_GEN_REG, invalid_now, invalid_soon);
                     // Allocating might take the previous register and move the original value
                     // In that case no move is needed.
                     if location != allocation_bitmap {
-                        println!("Move0 {}, {}", self.register_state.to_string(new.id.get()), self.register_state.to_string(operand.id.get()));
+                        println!("Mov0 {}, {}", self.register_state.to_string(new.id.get()), self.register_state.to_string(operand.id.get()));
+                        self.register_state.compile_instruction(BasicOperation::Mov, &[new, operand]);
                     }
                     allocation_bitmap = location;
 
@@ -231,8 +233,11 @@ impl <'a> InstructionBuilder <'a> {
                     used_stable |= allocation_bitmap & NON_VOL_GEN_REG
                 }
                 invalid_soon = 0;
-                if !operand.used_after(index) { //
-                    invalid_now &= !bitmap;
+                // If this operand is going to be freed there is no need to invalidate it.
+                // I cannot be freed until after invalidation is done since otherwise
+                //  they might be overridden while saving needed invalidated registers.
+                if !operand.used_after(index) {
+                    invalid_now &= !allocation_bitmap;
                 }
                 bitmap = allocation_bitmap;
             }
@@ -247,28 +252,32 @@ impl <'a> InstructionBuilder <'a> {
                     free = false;
                 }
             }
-
-            let mut s = format!("{:?}", instruction.operator);
-
-            for &o in instruction.operands.iter() {
-                s += " ";
-                s += &self.register_state.to_string(o.id.get());
+            print!("{:?}", instruction.operator);
+            for o in &instruction.operands {
+                print!(" {}", self.register_state.to_string(o.id.get()));
             }
-            let f = format!("{}", self.register_state.to_string(instruction.operands.first().unwrap().id.get()));
+            println!();
+            self.register_state.compile_instruction(instruction.operator, &instruction.operands);
+
+            if let Some(dest) = instruction.dest {
+                if !free {
+                    let first = *instruction.operands.first().unwrap();
+                    println!("Mov1 {}, {}", self.register_state.to_string(dest.id.get()), self.register_state.to_string(first.id.get()));
+                    self.register_state.compile_instruction(BasicOperation::Mov, &[dest, first]);
+                }
+            }
             for &operand in &instruction.operands {
                 if !operand.used_after(index) {
                     self.register_state.free(operand);
                 }
             }
 
-            println!("{}", s);
-            if let Some(dest) = instruction.dest {
-                if !free {
-                    println!("Move1 {}, {}", self.register_state.to_string(dest.id.get()), f);
-                }
-            }
+
 
         }
-        println!("{:b}", used_stable);
+
+        std::fs::write("out.bin", &self.register_state.output).unwrap();
+
+        println!();
     }
 }

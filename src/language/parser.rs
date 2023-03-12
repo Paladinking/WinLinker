@@ -328,7 +328,13 @@ impl <'a>Parser<'a> {
                         Expression::SingleOperator { operator, expr} => {
                             operator.resolve_type(&target_types[expr]).map_err(err_map)?
                         }
-                        Expression::IntLiteral(_) => Type::AnyInt,
+                        Expression::IntLiteral(val) => {
+                            match val {
+                                0..=4294967295 => Type::AnyInt,
+                                _ => return Err(ParseError::new(ParseErrorType::InvalidLiteral(val.to_string()), e.pos))
+                            }
+
+                        },
                         Expression::BoolLiteral(_) => Type::Bool,
                         Expression::None => unreachable!("None expressions are only created for mem::replace")
                     };
