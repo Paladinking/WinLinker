@@ -99,7 +99,6 @@ struct Program <'a> {
 }
 
 struct Parser<'a> {
-    data : &'a str,
     chars : std::str::Chars<'a>,
     arena : &'a Bump,
     types : HashMap<String, Type>,
@@ -121,7 +120,6 @@ impl <'a>Parser<'a> {
         variables.insert("exit_code".to_owned(), arena.alloc(Variable::new(Type::U32)));
         let chars = data.chars();
         Parser {
-            data,
             chars,
             arena,
             types,

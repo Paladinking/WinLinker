@@ -1,33 +1,22 @@
 use std::cell::Cell;
+use std::collections::HashMap;
+use std::ops::Index;
+use crate::language::amd_win64::instruction::OperandType::Reg;
 use super::registers::*;
 use crate::language::types::Type;
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum BasicOperation {
     IMul, Mul, Add, Sub, IDiv, Div, Mov, Push, Pop, Cmp, SetE, SetNe, SetA, SetB, SetAE, SetBE, SetG, SetL,
     SetGE, SetLE, And, Or, Xor, MovRet
 }
 
 impl BasicOperation {
-    // Returns true if swapping first and second operand does not affect the result
-    pub fn is_symmetric(&self) -> bool {
-        match self {
-            BasicOperation::IMul | BasicOperation::Mul | BasicOperation::Add |
-            BasicOperation::And | BasicOperation::Or | BasicOperation::Xor => true,
 
-            BasicOperation::Sub | BasicOperation::IDiv | BasicOperation::Div |
-            BasicOperation::Mov | BasicOperation::Push | BasicOperation::Pop |
-            BasicOperation::Cmp | BasicOperation::SetE | BasicOperation::SetNe |
-            BasicOperation::SetA | BasicOperation::SetB | BasicOperation::SetAE |
-            BasicOperation::SetBE | BasicOperation::SetG | BasicOperation::SetL |
-            BasicOperation::SetGE | BasicOperation::SetLE | BasicOperation::MovRet => false,
-        }
-    }
-
-    pub fn bitmap_hint(&self, n : usize) -> u64 {
+    pub fn bitmap_hint(&self, n : usize, size : OperandSize) -> u64 {
         match n {
-            0 => self.first_bitmap(),
-            1 => self.second_bitmap(),
+            0 => self.first_bitmap(size),
+            1 => self.second_bitmap(size),
             _ => panic!("To many operands")
         }
     }
@@ -49,10 +38,12 @@ impl BasicOperation {
         }
     }
 
-    pub fn first_bitmap(&self) -> u64 {
+    pub fn first_bitmap(&self, size : OperandSize) -> u64 {
         match self {
             BasicOperation::Div | BasicOperation::IDiv |
             BasicOperation::Mul | BasicOperation::MovRet => RAX,
+
+            BasicOperation::IMul if size == OperandSize::BYTE => RAX,
 
             BasicOperation::IMul | BasicOperation::Add | BasicOperation::Sub |
             BasicOperation::Mov | BasicOperation::And | BasicOperation::Or |
@@ -65,7 +56,7 @@ impl BasicOperation {
         }
     }
 
-    pub fn second_bitmap(&self) -> u64 {
+    pub fn second_bitmap(&self, _size : OperandSize) -> u64 {
         match self {
             BasicOperation::IDiv | BasicOperation::Div => MEM_GEN_REG & !RDX,
             BasicOperation::Mul | BasicOperation::IMul => MEM_GEN_REG,
@@ -80,17 +71,17 @@ impl BasicOperation {
         }
     }
 
-    pub fn next_bitmap(&self, first_map: u64, n : usize) -> u64 {
+    pub fn next_bitmap(&self, first_map: u64, n : usize, size : OperandSize) -> u64 {
         debug_assert!(first_map.count_ones() == 1);
         match n {
-            0 => self.first_bitmap(),
-            1 => ((first_map ^ MEM) | !MEM) & self.second_bitmap(),
+            0 => self.first_bitmap(size),
+            1 => ((first_map ^ MEM) | !MEM) & self.second_bitmap(size),
             _ => panic!("Too many operands")
         }
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum OperandSize {
     BYTE = 1, WORD = 2, DWORD = 4, QWORD = 8,
 }
@@ -164,4 +155,325 @@ impl <'a> Instruction<'a> {
             operator, operands, dest
         }
     }
+}
+
+macro_rules! mnemonic {
+    ($e:expr) => {
+        $e as u64
+    };
+    ($e:expr $(, $more:expr)*) => {
+      ((mnemonic!($($more),*)) << 8) | ($e as u64)
+    };
+}
+
+type Identifier = (BasicOperation, OperandSize, u64);
+
+fn size_repeat_instr(map : &mut HashMap<Identifier, Vec<Mnemonic>>, op : BasicOperation, id : u64, mnemonics : Vec<Mnemonic>) {
+    map.insert((op, OperandSize::WORD, id),mnemonics.clone());
+    let mut word_mnemonics = mnemonics.clone();
+    let index = mnemonics.iter().enumerate().find(|(_, &mn)| mn.is_opcode()).unwrap().0;
+    word_mnemonics.insert(index, Mnemonic::Prefix(0x66));
+    let mut qword_mnemonics = mnemonics.clone();
+    qword_mnemonics.insert(index, Mnemonic::Rex(0x48));
+    map.insert((op, OperandSize::WORD, id), word_mnemonics);
+    map.insert((op, OperandSize::DWORD, id), mnemonics);
+    map.insert((op, OperandSize::QWORD, id), qword_mnemonics);
+}
+
+fn reg_rm_instr(map : &mut HashMap<Identifier, Vec<Mnemonic>>, op : BasicOperation, opcode : Mnemonic) {
+    size_repeat_instr(map, op, mnemonic!(OperandType::Reg, OperandType::Reg),
+        vec![opcode, Mnemonic::ModRm(0), Mnemonic::RegReg, Mnemonic::RmReg]
+    );
+    size_repeat_instr(map, op, mnemonic!(OperandType::Reg, OperandType::Mem),
+        vec![opcode, Mnemonic::ModRm(0), Mnemonic::RegReg, Mnemonic::Mem]
+    );
+}
+
+fn rm_reg_instr(map : &mut HashMap<Identifier, Vec<Mnemonic>>, op : BasicOperation, opcode : Mnemonic) {
+    size_repeat_instr(map, op, mnemonic!(OperandType::Mem, OperandType::Reg),
+        vec![opcode, Mnemonic::ModRm(0), Mnemonic::Mem, Mnemonic::RegReg]
+    );
+}
+
+fn rm_imm_instr(map : &mut HashMap<Identifier, Vec<Mnemonic>>, op : BasicOperation, opcode : Mnemonic, im : u8) {
+    map.insert(
+        (op, OperandSize::WORD, mnemonic!(OperandType::Reg, OperandType::Imm)),
+        vec![Mnemonic::Prefix(0x66), opcode, Mnemonic::ModRm(im << 3), Mnemonic::RmReg, Mnemonic::RegImm(OperandSize::WORD)]
+    );
+    map.insert(
+        (op, OperandSize::WORD, mnemonic!(OperandType::Mem, OperandType::Imm)),
+        vec![Mnemonic::Prefix(0x66), opcode, Mnemonic::ModRm(im << 3), Mnemonic::Mem, Mnemonic::RegImm(OperandSize::WORD)]
+    );
+
+    map.insert(
+        (op, OperandSize::DWORD, mnemonic!(OperandType::Reg, OperandType::Imm)),
+        vec![opcode, Mnemonic::ModRm(im << 3), Mnemonic::RmReg, Mnemonic::RegImm(OperandSize::DWORD)]
+    );
+    map.insert(
+        (op, OperandSize::DWORD, mnemonic!(OperandType::Mem, OperandType::Imm)),
+        vec![opcode, Mnemonic::ModRm(im << 3), Mnemonic::Mem, Mnemonic::RegImm(OperandSize::DWORD)]
+    );
+
+    map.insert(
+        (op, OperandSize::QWORD, mnemonic!(OperandType::Reg, OperandType::Imm)),
+        vec![Mnemonic::Rex(0x48), opcode, Mnemonic::ModRm(im << 3), Mnemonic::RmReg, Mnemonic::RegImm(OperandSize::DWORD)]
+    );
+    map.insert(
+        (op, OperandSize::QWORD, mnemonic!(OperandType::Mem, OperandType::Imm)),
+        vec![Mnemonic::Rex(0x48), opcode, Mnemonic::ModRm(im << 3), Mnemonic::Mem, Mnemonic::RegImm(OperandSize::DWORD)]
+    );
+}
+
+fn standard_instr(map :&mut HashMap<Identifier, Vec<Mnemonic>>, op : BasicOperation,
+    rm_r8 : u8, r_rm8 : u8, rm_i8 : u8, rm_r : u8, r_rm : u8, rm_i : u8, im : u8
+) {
+    reg_rm_instr(map, op, Mnemonic::Opcode(r_rm));
+    rm_reg_instr(map, op, Mnemonic::Opcode(rm_r));
+    rm_imm_instr(map, op, Mnemonic::Opcode(rm_i), im);
+    map.insert(
+        (op, OperandSize::BYTE, mnemonic!(OperandType::Reg, OperandType::Reg)),
+        vec![Mnemonic::Opcode(r_rm8), Mnemonic::ModRm(0), Mnemonic::RegReg, Mnemonic::RmReg]
+    );
+    map.insert(
+        (op, OperandSize::BYTE, mnemonic!(OperandType::Reg, OperandType::Mem)),
+        vec![Mnemonic::Opcode(r_rm8), Mnemonic::ModRm(0), Mnemonic::RegReg, Mnemonic::Mem]
+    );
+    map.insert(
+        (op, OperandSize::BYTE, mnemonic!(OperandType::Mem, OperandType::Reg)),
+        vec![Mnemonic::Opcode(rm_r8), Mnemonic::ModRm(0), Mnemonic::Mem, Mnemonic::RegReg]
+    );
+
+    map.insert(
+        (op, OperandSize::BYTE, mnemonic!(OperandType::Reg, OperandType::Imm)),
+        vec![Mnemonic::Opcode(rm_i8), Mnemonic::ModRm(im), Mnemonic::RmReg, Mnemonic::RegImm(OperandSize::BYTE)]
+    );
+    map.insert(
+        (op, OperandSize::BYTE, mnemonic!(OperandType::Mem, OperandType::Imm)),
+        vec![Mnemonic::Opcode(rm_i8), Mnemonic::ModRm(im), Mnemonic::Mem, Mnemonic::RegImm(OperandSize::BYTE)]
+    );
+}
+
+
+
+#[derive(Clone, Copy)]
+enum Mnemonic {
+    Prefix(u8),
+    Value(u8), // Can be used for injecting extra instructions before / after main one
+    Rex(u8),
+    Opcode(u8),
+    Opcode2(u8), // Opcode from secondary opcode map
+    ModRm(u8),
+    RegReg, // Register in ModRm.reg
+    PlusReg, // Register in second opcode byte, has to come directly after Opcode / Opcode2
+    Mem, // Memory in ModRm.r/m (+ potentially SIB)
+    RmReg, //  Register in ModRm.r/m
+    RegImm(OperandSize), //Immediate value
+    Pass, // Ignore operand
+}
+
+impl Mnemonic {
+    fn is_opcode(&self) -> bool {
+        match self {
+            Mnemonic::Opcode(_) | Mnemonic::Opcode2(_) => true,
+            _ => false
+        }
+    }
+}
+
+#[repr(u8)]
+enum OperandType {
+    Reg = 0, Mem = 1, Imm = 2
+}
+
+fn create_instruction_map() -> HashMap<(BasicOperation, OperandSize, u64), Vec<Mnemonic>> {
+    use Mnemonic::*;
+    let mut map = HashMap::new();
+    map.insert(
+        (BasicOperation::IMul, OperandSize::BYTE, mnemonic!(OperandType::Reg, OperandType::Reg)),
+        vec![Opcode(0xF6), ModRm(5 << 3), Pass, RmReg]
+    );
+    map.insert(
+        (BasicOperation::IMul, OperandSize::BYTE, mnemonic!(OperandType::Reg, OperandType::Mem)),
+        vec![Opcode(0xF6), ModRm(5 << 3), Pass, Mem]
+    );
+    reg_rm_instr(&mut map, BasicOperation::IMul, Opcode2(0xAF));
+    map.insert(
+        (BasicOperation::Mul, OperandSize::BYTE, mnemonic!(OperandType::Reg, OperandType::Reg)),
+        vec![Opcode(0xF6), ModRm(4 << 3), Pass, RmReg]
+    );
+    map.insert(
+        (BasicOperation::Mul, OperandSize::BYTE, mnemonic!(OperandType::Reg, OperandType::Mem)),
+        vec![Opcode(0xF6), ModRm(4 << 3), Pass, Mem]
+    );
+    size_repeat_instr(&mut map, BasicOperation::Mul, mnemonic!(OperandType::Reg, OperandType::Reg),
+        vec![Opcode(0xF7), ModRm(4 << 3), Pass, RmReg]
+    );
+    size_repeat_instr(&mut map, BasicOperation::Mov, mnemonic!(OperandType::Reg, OperandType::Mem),
+        vec![Opcode(0xF7), ModRm(4 << 3), Pass, Mem]
+    );
+    standard_instr(&mut map, BasicOperation::Add, 0x00, 0x02, 0x80, 0x01, 0x03, 0x81, 0);
+    standard_instr(&mut map, BasicOperation::Sub, 0x28, 0x2A, 0x80, 0x29, 0x2B, 0x81, 5);
+
+    map.insert(
+        (BasicOperation::IDiv, OperandSize::BYTE, mnemonic!(OperandType::Reg, OperandType::Reg)),
+        vec![Value(0x66), Value(0x98), Opcode(0xF6), ModRm(7 << 3), Pass, RmReg]
+    );
+    map.insert(
+        (BasicOperation::IDiv, OperandSize::BYTE, mnemonic!(OperandType::Reg, OperandType::Mem)),
+        vec![Value(0x66), Value(0x98), Value(0xF6), ModRm(7 << 3), Pass, Mem]
+    );
+    map.insert(
+        (BasicOperation::IDiv, OperandSize::WORD, mnemonic!(OperandType::Reg, OperandType::Reg)),
+        vec![Value(0x66), Value(0x99), Prefix(0x66), Opcode(0xF7), ModRm(7 << 3), Pass, RmReg]
+    );
+    map.insert(
+        (BasicOperation::IDiv, OperandSize::WORD, mnemonic!(OperandType::Reg, OperandType::Mem)),
+        vec![Value(0x66), Value(0x99), Prefix(0x66), Opcode(0xF7), ModRm(7 << 3), Pass, Mem]
+    );
+    map.insert(
+        (BasicOperation::IDiv, OperandSize::DWORD, mnemonic!(OperandType::Reg, OperandType::Reg)),
+        vec![Value(0x99), Opcode(0xF7), ModRm(7 << 3), Pass, RmReg]
+    );
+    map.insert(
+        (BasicOperation::IDiv, OperandSize::DWORD, mnemonic!(OperandType::Reg, OperandType::Mem)),
+        vec![Value(0x99), Opcode(0xF7), ModRm(7 << 3), Pass, Mem]
+    );
+    map.insert(
+        (BasicOperation::IDiv, OperandSize::QWORD, mnemonic!(OperandType::Reg, OperandType::Reg)),
+        vec![Value(0x48), Value(0x99), Rex(0x48), Opcode(0xF7), ModRm(7 << 3), Pass, RmReg]
+    );
+    map.insert(
+        (BasicOperation::IDiv, OperandSize::QWORD, mnemonic!(OperandType::Reg, OperandType::Mem)),
+        vec![Value(0x48), Value(0x99), Rex(0x48), Opcode(0xF7), ModRm(7 << 3), Pass, Mem]
+    );
+
+    map.insert(
+        (BasicOperation::Div, OperandSize::BYTE, mnemonic!(OperandType::Reg, OperandType::Reg)),
+        vec![Value(0x31), Value(0xD2), Opcode(0xF6), ModRm(6 << 3), Pass, RmReg]
+    );
+    map.insert(
+        (BasicOperation::Div, OperandSize::BYTE, mnemonic!(OperandType::Reg, OperandType::Mem)),
+        vec![Value(0x31), Value(0xD2), Value(0xF6), ModRm(6 << 3), Pass, Mem]
+    );
+    size_repeat_instr(&mut map, BasicOperation::Div, mnemonic!(OperandType::Reg, OperandType::Reg),
+                      vec![Value(0x31), Value(0xD2), Opcode(0xF7), ModRm(6 << 3), Pass, RmReg]
+    );
+    size_repeat_instr(&mut map, BasicOperation::Div, mnemonic!(OperandType::Reg, OperandType::Mem),
+                      vec![Value(0x31), Value(0xD2), Opcode(0xF7), ModRm(6 << 3), Pass, Mem]
+    );
+
+    standard_instr(&mut map, BasicOperation::Mov, 0x88, 0x8A, 0xC6, 0x89, 0x8B, 0xC7, 0);
+    map.insert(
+        (BasicOperation::Mov, OperandSize::BYTE, mnemonic!(OperandType::Reg, OperandType::Imm)),
+        vec![Opcode(0xB0), PlusReg, RegImm(OperandSize::BYTE)]
+    );
+    map.insert(
+        (BasicOperation::Mov, OperandSize::WORD, mnemonic!(OperandType::Reg, OperandType::Imm)),
+        vec![Prefix(0x66), Opcode(0xB8), PlusReg, RegImm(OperandSize::WORD)]
+    );
+    map.insert(
+        (BasicOperation::Mov, OperandSize::DWORD, mnemonic!(OperandType::Reg, OperandType::Imm)),
+        vec![Opcode(0xB8), PlusReg, RegImm(OperandSize::DWORD)]
+    );
+    map.insert(
+        (BasicOperation::Mov, OperandSize::QWORD, mnemonic!(OperandType::Reg, OperandType::Imm)),
+        vec![Rex(0x48), Opcode(0xB8), PlusReg, RegImm(OperandSize::QWORD)]
+    );
+    standard_instr(&mut map, BasicOperation::Cmp, 0x38, 0x3A, 0x80, 0x39, 0x3B, 0x81, 7);
+
+
+    standard_instr(&mut map, BasicOperation::And, 0x20, 0x22, 0x80, 0x21, 0x23, 0x81, 4);
+    map
+}
+
+pub fn tst() {
+    use Mnemonic::*;
+    use BasicOperation::*;
+    use OperandSize::*;
+    let map = create_instruction_map();
+
+
+    let operands : Vec<u64> = vec![0b001, 0b000];
+    let mut iter = operands.iter();
+    let mut bytes = Vec::new();
+    let mut rex : Option<u8> = None;
+    let mut opcode_index = 0;
+    let mut mod_rm_index = 0;
+    for op in map.get(&(And, QWORD, mnemonic!(OperandType::Reg, OperandType::Reg))).unwrap() {
+        match op {
+            Prefix(val) | Value(val) => bytes.push(*val),
+            Rex(r) => rex = Some(*r),
+            Opcode(opcode) => {
+                opcode_index = bytes.len();
+                bytes.push(*opcode);
+            },
+            Opcode2(opcode) => {
+                opcode_index = bytes.len();
+                bytes.push(0x0f); // Secondary opcode map escape
+                bytes.push(*opcode);
+            }
+            ModRm(initial) => {
+                mod_rm_index = bytes.len();
+                bytes.push(*initial);
+            },
+            RegReg => {
+                let reg = *iter.next().unwrap() as u8;
+                if reg > 7 {
+                    *rex.get_or_insert(0x40) |= (1 << 2);
+                }
+                bytes[mod_rm_index] |= ((reg & 0b111) << 3);
+            },
+            PlusReg => {
+                let reg = *iter.next().unwrap() as u8;
+                if reg > 7 {
+                    *rex.get_or_insert(0x40) |= (1 << 2);
+                }
+                // PlusReg always follows Opcode / Opcode2
+                let len = bytes.len();
+                bytes[len - 1] |= (reg & 0b111);
+            }
+            Mem => {
+                let offset = *iter.next().unwrap() as u32; // Offset from rsp
+                bytes.push(0x24); // SIB base rsp scale 1, index 4
+                let mod_rm_mask = match offset {
+                    0 => 0b00000100, // ModRm.md = 00 (no offset), ModRm.r/m = 100 (address by SIB)
+                    1..=255 => {
+                        bytes.push(offset as u8);
+                        0b01000100  // ModRm.md = 01 (8-bit offset), ModRm.r/m = 100 (address by SIB)
+                    },
+                    256.. => {
+                        bytes.extend_from_slice(&offset.to_le_bytes());
+                        0b10000100
+                    }, // ModRm.md = 10 (32-bit offset), ModRm.r/m = 100 (address by SIB)
+                };
+                bytes[mod_rm_index] = (bytes[mod_rm_index] & 0b00111000) | mod_rm_mask;
+
+            }
+            RmReg => {
+                let reg = *iter.next().unwrap() as u8;
+                if reg > 7 {
+                    *rex.get_or_insert(0x40) |= 1;
+                }
+                bytes[mod_rm_index] |= 0b11000000 | (reg & 0b111);
+            }
+            RegImm(size) => {
+                let imm : &[u8; 8] = &iter.next().unwrap().to_le_bytes();
+                bytes.extend_from_slice(&imm[0..(*size as usize)]);
+            },
+            Pass => {
+                iter.next().unwrap();
+            }
+        }
+    }
+    if let Some(rex) = rex {
+        bytes.insert(opcode_index, rex);
+    }
+    for byte in bytes {
+        print!("{:02X}", byte);
+    }
+
+    // Add r13, rdi
+    println!();
+
+
 }

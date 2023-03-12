@@ -6,6 +6,13 @@ use crate::language::operator::{DualOperator, SingleOperator};
 use crate::language::parser::{Expression, ExpressionData, Statement, StatementData, Variable};
 use crate::language::types::Type;
 
+// Represents one function
+pub struct ProgramFrame {
+    stack_size : usize,
+    saved_registers : u64,
+    binary : Vec<u8>,
+}
+
 
 pub struct InstructionBuilder <'a> {
     instr : Vec<Instruction<'a>>,
@@ -18,6 +25,7 @@ pub struct InstructionBuilder <'a> {
 
 impl <'a> InstructionBuilder <'a> {
     pub fn new<'b> (arena : &'a Bump, vars: &'b HashMap<String, &Variable>) -> InstructionBuilder<'a> {
+        crate::language::amd_win64::instruction::tst();
         let register_state = RegisterState::new();
         let operands = vars.iter().enumerate().map(|(i, (_, v))|{
             v.id.replace(Some(i));
@@ -54,8 +62,18 @@ impl <'a> InstructionBuilder <'a> {
                     self.invalidations.push((self.instr.len(), RDX | RAX));
                     if t.is_signed() {BasicOperation::IDiv } else {BasicOperation::Div }
                 },
-                DualOperator::Multiply => if t.is_signed() { BasicOperation::IMul } else {
-                    self.invalidations.push((self.instr.len(), RDX | RAX));
+                DualOperator::Multiply => if t.is_signed() {
+                    if size == OperandSize::BYTE {
+                        self.invalidations.push((self.instr.len(), RAX));
+                    }
+                    BasicOperation::IMul
+                } else {
+                    if size == OperandSize::BYTE {
+                        self.invalidations.push((self.instr.len(), RAX));
+                    } else {
+                        self.invalidations.push((self.instr.len(), RDX | RAX));
+                    }
+
                     BasicOperation::Mul
                 },
                 DualOperator::Minus => BasicOperation::Sub,
@@ -154,9 +172,10 @@ impl <'a> InstructionBuilder <'a> {
         // Allows e.g using rax if later instruction uses mul
         for instruction in self.instr.iter() {
             for (i, &operand) in instruction.operands.iter().enumerate() {
-                let hint = instruction.operator.bitmap_hint(i);
+                let hint = instruction.operator.bitmap_hint(i, operand.size);
                 self.register_state.allocate_hint(operand, hint);
             }
+            // Propagate the hint to dest to allow combining with future instructions
             if let (Some(dest), &first) = (instruction.dest, instruction.operands.first().unwrap()) {
                 self.register_state.propagate_hint(first, dest);
             }
@@ -186,7 +205,7 @@ impl <'a> InstructionBuilder <'a> {
             let destroyed = instruction.operator.destroyed();
             for (i, operand) in instruction.operands.iter_mut().enumerate() {
                 bitmap = instruction.operator.next_bitmap(
-                    bitmap, i
+                    bitmap, i, operand.size
                 );
 
                 if self.register_state.is_free(operand) {
