@@ -1,4 +1,4 @@
-use crate::language::amd_win64::instruction::{Instruction, InstructionCompiler, InstructionOperand};
+use crate::language::amd_win64::instruction::{Instruction, InstructionOperand};
 use crate::language::amd_win64::operation::{Operand, OperandSize, OperationType};
 
 

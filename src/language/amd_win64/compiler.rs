@@ -31,7 +31,7 @@ impl <'a> InstructionBuilder <'a> {
             v.id.replace(Some(i));
             &*arena.alloc(Operand::local(OperandSize::from(v.var_type)))
         }).collect();
-        let exit_code = vars.get("exit_code").unwrap().id.borrow().unwrap();
+        let exit_code = vars.get("exit_code").unwrap().id.get().unwrap();
         InstructionBuilder {
             operations: Vec::new(), invalidations : Vec::new(),
             operands, arena, register_state, exit_code
@@ -112,7 +112,7 @@ impl <'a> InstructionBuilder <'a> {
         for e in expr.iter() {
             match e.expression {
                 Expression::Variable(v) => {
-                    let id = v.id.borrow().unwrap();
+                    let id = v.id.get().unwrap();
                     locations.push(self.operands[id].clone());
                 },
                 Expression::Operator { first, operator, second } => {
@@ -138,7 +138,7 @@ impl <'a> InstructionBuilder <'a> {
                 Expression::None => unreachable!("Should not exist ever.")
             };
         }
-        let index = dest.id.borrow().unwrap();
+        let index = dest.id.get().unwrap();
         let new_dest = self.arena.alloc(Operand::local(OperandSize::from(dest.var_type)));
         self.operands[index] = new_dest;
         if prev_len ==  self.operations.len() { // Whole expression was only a variable or immediate value.
@@ -154,7 +154,7 @@ impl <'a> InstructionBuilder <'a> {
         }
     }
 
-    pub fn with(&mut self, statements : &Vec<StatementData<'a>>) -> &mut Self {
+    pub fn with(mut self, statements : &Vec<StatementData<'a>>) -> Self {
         for statement in statements {
             match &statement.statement { Statement::Assignment { var, expr } => {
                 self.add_assigment(*var, &expr);
@@ -167,9 +167,9 @@ impl <'a> InstructionBuilder <'a> {
         self
     }
 
-    pub fn compile(&mut self) {
-        // Allocate hints for what registers should be used
-        // Allows e.g using rax if later instruction uses mul
+    // Allocate hints for what registers should be used
+    // Allows e.g using rax if later instruction uses mul
+    fn allocate_hints(&mut self) {
         for instruction in self.operations.iter() {
             for (i, &operand) in instruction.operands.iter().enumerate() {
                 let hint = instruction.operator.bitmap_hint(i, operand.size);
@@ -180,6 +180,10 @@ impl <'a> InstructionBuilder <'a> {
                 self.register_state.propagate_hint(first, dest);
             }
         }
+    }
+
+    pub fn compile(mut self) {
+        self.allocate_hints();
 
         let mut invalidation = 0;
         let mut used_stable = 0_u64;

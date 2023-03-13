@@ -1,18 +1,16 @@
-use std::cell::Cell;
 use std::collections::HashMap;
 use std::hash::Hash;
 use derivative::Derivative;
 use crate::language::amd_win64::operation::{OperationType, OperandSize};
-use super::registers::*;
 
 #[derive(Clone, Copy)]
 enum Mnemonic {
-    Prefix(u8),
+    Prefix(u8), // e.g 0x66 (Operand size override prefix) for WORD operand size
     Value(u8), // Can be used for injecting extra instructions before / after main one
-    Rex(u8),
+    Rex(u8), // e.g 0x48 for QWORD operand size
     Opcode(u8),
     Opcode2(u8), // Opcode from secondary opcode map
-    ModRm(u8),
+    ModRm(u8), // Should always precede any RegReg, RmReg or Mem
     RegReg, // Register in ModRm.reg
     PlusReg, // Register in second opcode byte, has to come directly after Opcode / Opcode2
     Mem, // Memory in ModRm.r/m (+ potentially SIB)
@@ -117,8 +115,8 @@ impl InstructionCompiler {
     pub fn compile_instruction(&self, instruction : &Instruction, res : &mut Vec<u8>) {
         let start = res.len();
         let mut rex : Option<u8> = None;
-        let mut opcode_index = 0;
-        let mut mod_rm_index = 0;
+        let mut opcode_index = None;
+        let mut mod_rm_index = None;
         let mut index = 0;
 
         for op in self.map.get(instruction).unwrap() {
@@ -126,16 +124,16 @@ impl InstructionCompiler {
                 Mnemonic::Prefix(val) | Mnemonic::Value(val) => res.push(*val),
                 Mnemonic::Rex(r) => rex = Some(*r),
                 Mnemonic::Opcode(opcode) => {
-                    opcode_index = res.len();
+                    opcode_index.replace(res.len());
                     res.push(*opcode);
                 },
                 Mnemonic::Opcode2(opcode) => {
-                    opcode_index = res.len();
+                    opcode_index.replace(res.len());
                     res.push(0x0f); // Secondary opcode map escape
                     res.push(*opcode);
                 }
                 Mnemonic::ModRm(initial) => {
-                    mod_rm_index = res.len();
+                    mod_rm_index.replace(res.len());
                     res.push(*initial);
                 },
                 Mnemonic::RegReg => {
@@ -143,7 +141,7 @@ impl InstructionCompiler {
                     if reg > 7 {
                         *rex.get_or_insert(0x40) |= 1 << 2;
                     }
-                    res[mod_rm_index] |= (reg & 0b111) << 3;
+                    res[mod_rm_index.unwrap()] |= (reg & 0b111) << 3;
                 },
                 Mnemonic::PlusReg => {
                     let reg = instruction.get_reg(&mut index);
@@ -165,18 +163,17 @@ impl InstructionCompiler {
                         },
                         256.. => {
                             res.extend_from_slice(&offset.to_le_bytes());
-                            0b10000100
-                        }, // ModRm.md = 10 (32-bit offset), ModRm.r/m = 100 (address by SIB)
+                            0b10000100 // ModRm.md = 10 (32-bit offset), ModRm.r/m = 100 (address by SIB)
+                        },
                     };
-                    res[mod_rm_index] = (res[mod_rm_index] & 0b00111000) | mod_rm_mask;
-
+                    res[mod_rm_index.unwrap()] = (res[mod_rm_index.unwrap()] & 0b00111000) | mod_rm_mask;
                 }
                 Mnemonic::RmReg => {
                     let reg = instruction.get_reg(&mut index);
                     if reg > 7 {
                         *rex.get_or_insert(0x40) |= 1;
                     }
-                    res[mod_rm_index] |= 0b11000000 | (reg & 0b111);
+                    res[mod_rm_index.unwrap()] |= 0b11000000 | (reg & 0b111);
                 }
                 Mnemonic::RegImm(size) => {
                     let imm : &[u8; 8] = &instruction.get_imm(&mut index).to_le_bytes();
@@ -187,8 +184,9 @@ impl InstructionCompiler {
                 }
             }
         }
+
         if let Some(rex) = rex {
-            res.insert(opcode_index, rex);
+            res.insert(opcode_index.unwrap(), rex);
         }
         for b in &res[start..] {
             print!("{:02X}", b);

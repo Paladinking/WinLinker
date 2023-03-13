@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter, Debug};
 use bumpalo::Bump;
@@ -15,14 +15,14 @@ pub struct Variable {
     pub var_type : Type,
     pub global : bool,
 
-    pub id : RefCell<Option<usize>>
+    pub id : Cell<Option<usize>>
 }
 
 impl Variable {
     fn new(var_type : Type) -> Variable {
         Variable {
             var_type, global : false,
-            id : RefCell::new(None)
+            id : Cell::new(None)
         }
     }
 }
