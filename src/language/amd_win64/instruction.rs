@@ -5,106 +5,6 @@ use derivative::Derivative;
 use crate::language::amd_win64::operation::{OperationType, OperandSize};
 use super::registers::*;
 
-
-
-#[macro_export]
-macro_rules! mnemonic {
-    ($e:expr) => {
-        $e as u64
-    };
-    ($e:expr $(, $more:expr)*) => {
-      ((mnemonic!($($more),*)) << 8) | ($e as u64)
-    };
-}
-
-
-fn size_repeat_instr(map : &mut HashMap<Instruction, Vec<Mnemonic>>, op : OperationType, operands : &[OperandType], mnemonics : Vec<Mnemonic>) {
-    map.insert(Instruction::mnemonic(op, OperandSize::WORD, operands),mnemonics.clone());
-    let mut word_mnemonics = mnemonics.clone();
-    let index = mnemonics.iter().enumerate().find(|(_, &mn)| mn.is_opcode()).unwrap().0;
-    word_mnemonics.insert(index, Mnemonic::Prefix(0x66));
-    let mut qword_mnemonics = mnemonics.clone();
-    qword_mnemonics.insert(index, Mnemonic::Rex(0x48));
-    map.insert(Instruction::mnemonic(op, OperandSize::WORD, operands), word_mnemonics);
-    map.insert(Instruction::mnemonic(op, OperandSize::DWORD, operands), mnemonics);
-    map.insert(Instruction::mnemonic(op, OperandSize::QWORD, operands), qword_mnemonics);
-}
-
-fn reg_rm_instr(map : &mut HashMap<Instruction, Vec<Mnemonic>>, op : OperationType, opcode : Mnemonic) {
-    size_repeat_instr(map, op, &[OperandType::Reg, OperandType::Reg],
-                      vec![opcode, Mnemonic::ModRm(0), Mnemonic::RegReg, Mnemonic::RmReg]
-    );
-    size_repeat_instr(map, op, &[OperandType::Reg, OperandType::Mem],
-        vec![opcode, Mnemonic::ModRm(0), Mnemonic::RegReg, Mnemonic::Mem]
-    );
-}
-
-fn rm_reg_instr(map : &mut HashMap<Instruction, Vec<Mnemonic>>, op : OperationType, opcode : Mnemonic) {
-    size_repeat_instr(map, op, &[OperandType::Mem, OperandType::Reg],
-        vec![opcode, Mnemonic::ModRm(0), Mnemonic::Mem, Mnemonic::RegReg]
-    );
-}
-
-fn rm_imm_instr(map : &mut HashMap<Instruction, Vec<Mnemonic>>, op : OperationType, opcode : Mnemonic, im : u8) {
-    map.insert(
-        Instruction::mnemonic(op, OperandSize::WORD, &[OperandType::Reg, OperandType::Imm]),
-        vec![Mnemonic::Prefix(0x66), opcode, Mnemonic::ModRm(im << 3), Mnemonic::RmReg, Mnemonic::RegImm(OperandSize::WORD)]
-    );
-    map.insert(
-        Instruction::mnemonic(op, OperandSize::WORD, &[OperandType::Mem, OperandType::Imm]),
-        vec![Mnemonic::Prefix(0x66), opcode, Mnemonic::ModRm(im << 3), Mnemonic::Mem, Mnemonic::RegImm(OperandSize::WORD)]
-    );
-
-    map.insert(
-        Instruction::mnemonic(op, OperandSize::DWORD, &[OperandType::Reg, OperandType::Imm]),
-        vec![opcode, Mnemonic::ModRm(im << 3), Mnemonic::RmReg, Mnemonic::RegImm(OperandSize::DWORD)]
-    );
-    map.insert(
-        Instruction::mnemonic(op, OperandSize::DWORD, &[OperandType::Mem, OperandType::Imm]),
-        vec![opcode, Mnemonic::ModRm(im << 3), Mnemonic::Mem, Mnemonic::RegImm(OperandSize::DWORD)]
-    );
-
-    map.insert(
-        Instruction::mnemonic(op, OperandSize::QWORD, &[OperandType::Reg, OperandType::Imm]),
-        vec![Mnemonic::Rex(0x48), opcode, Mnemonic::ModRm(im << 3), Mnemonic::RmReg, Mnemonic::RegImm(OperandSize::DWORD)]
-    );
-    map.insert(
-        Instruction::mnemonic(op, OperandSize::QWORD, &[OperandType::Mem, OperandType::Imm]),
-        vec![Mnemonic::Rex(0x48), opcode, Mnemonic::ModRm(im << 3), Mnemonic::Mem, Mnemonic::RegImm(OperandSize::DWORD)]
-    );
-}
-
-fn standard_instr(map :&mut HashMap<Instruction, Vec<Mnemonic>>, op : OperationType,
-                  rm_r8 : u8, r_rm8 : u8, rm_i8 : u8, rm_r : u8, r_rm : u8, rm_i : u8, im : u8
-) {
-    reg_rm_instr(map, op, Mnemonic::Opcode(r_rm));
-    rm_reg_instr(map, op, Mnemonic::Opcode(rm_r));
-    rm_imm_instr(map, op, Mnemonic::Opcode(rm_i), im);
-    map.insert(
-        Instruction::mnemonic(op, OperandSize::BYTE, &[OperandType::Reg, OperandType::Reg]),
-        vec![Mnemonic::Opcode(r_rm8), Mnemonic::ModRm(0), Mnemonic::RegReg, Mnemonic::RmReg]
-    );
-    map.insert(
-        Instruction::mnemonic(op, OperandSize::BYTE, &[OperandType::Reg, OperandType::Mem]),
-        vec![Mnemonic::Opcode(r_rm8), Mnemonic::ModRm(0), Mnemonic::RegReg, Mnemonic::Mem]
-    );
-    map.insert(
-        Instruction::mnemonic(op, OperandSize::BYTE, &[OperandType::Mem, OperandType::Reg]),
-        vec![Mnemonic::Opcode(rm_r8), Mnemonic::ModRm(0), Mnemonic::Mem, Mnemonic::RegReg]
-    );
-
-    map.insert(
-        Instruction::mnemonic(op, OperandSize::BYTE, &[OperandType::Reg, OperandType::Imm]),
-        vec![Mnemonic::Opcode(rm_i8), Mnemonic::ModRm(im << 3), Mnemonic::RmReg, Mnemonic::RegImm(OperandSize::BYTE)]
-    );
-    map.insert(
-        Instruction::mnemonic(op, OperandSize::BYTE, &[OperandType::Mem, OperandType::Imm]),
-        vec![Mnemonic::Opcode(rm_i8), Mnemonic::ModRm(im << 3), Mnemonic::Mem, Mnemonic::RegImm(OperandSize::BYTE)]
-    );
-}
-
-
-
 #[derive(Clone, Copy)]
 enum Mnemonic {
     Prefix(u8),
@@ -152,7 +52,8 @@ pub enum InstructionOperand {
     )
 }
 
-
+// An instruction contains everything about an instruction needed to compile it into machine code
+//  (except exact memory offsets). They can hash based on
 #[derive(PartialEq, Hash, Eq)]
 pub struct Instruction {
     operation : OperationType,
@@ -419,4 +320,89 @@ fn create_instruction_map() -> HashMap<Instruction, Vec<Mnemonic>> {
         );
     }
     map
+}
+
+fn size_repeat_instr(map : &mut HashMap<Instruction, Vec<Mnemonic>>, op : OperationType, operands : &[OperandType], mnemonics : Vec<Mnemonic>) {
+    map.insert(Instruction::mnemonic(op, OperandSize::WORD, operands),mnemonics.clone());
+    let mut word_mnemonics = mnemonics.clone();
+    let index = mnemonics.iter().enumerate().find(|(_, &mn)| mn.is_opcode()).unwrap().0;
+    word_mnemonics.insert(index, Mnemonic::Prefix(0x66));
+    let mut qword_mnemonics = mnemonics.clone();
+    qword_mnemonics.insert(index, Mnemonic::Rex(0x48));
+    map.insert(Instruction::mnemonic(op, OperandSize::WORD, operands), word_mnemonics);
+    map.insert(Instruction::mnemonic(op, OperandSize::DWORD, operands), mnemonics);
+    map.insert(Instruction::mnemonic(op, OperandSize::QWORD, operands), qword_mnemonics);
+}
+
+fn reg_rm_instr(map : &mut HashMap<Instruction, Vec<Mnemonic>>, op : OperationType, opcode : Mnemonic) {
+    size_repeat_instr(map, op, &[OperandType::Reg, OperandType::Reg],
+                      vec![opcode, Mnemonic::ModRm(0), Mnemonic::RegReg, Mnemonic::RmReg]
+    );
+    size_repeat_instr(map, op, &[OperandType::Reg, OperandType::Mem],
+                      vec![opcode, Mnemonic::ModRm(0), Mnemonic::RegReg, Mnemonic::Mem]
+    );
+}
+
+fn rm_reg_instr(map : &mut HashMap<Instruction, Vec<Mnemonic>>, op : OperationType, opcode : Mnemonic) {
+    size_repeat_instr(map, op, &[OperandType::Mem, OperandType::Reg],
+                      vec![opcode, Mnemonic::ModRm(0), Mnemonic::Mem, Mnemonic::RegReg]
+    );
+}
+
+fn rm_imm_instr(map : &mut HashMap<Instruction, Vec<Mnemonic>>, op : OperationType, opcode : Mnemonic, im : u8) {
+    map.insert(
+        Instruction::mnemonic(op, OperandSize::WORD, &[OperandType::Reg, OperandType::Imm]),
+        vec![Mnemonic::Prefix(0x66), opcode, Mnemonic::ModRm(im << 3), Mnemonic::RmReg, Mnemonic::RegImm(OperandSize::WORD)]
+    );
+    map.insert(
+        Instruction::mnemonic(op, OperandSize::WORD, &[OperandType::Mem, OperandType::Imm]),
+        vec![Mnemonic::Prefix(0x66), opcode, Mnemonic::ModRm(im << 3), Mnemonic::Mem, Mnemonic::RegImm(OperandSize::WORD)]
+    );
+
+    map.insert(
+        Instruction::mnemonic(op, OperandSize::DWORD, &[OperandType::Reg, OperandType::Imm]),
+        vec![opcode, Mnemonic::ModRm(im << 3), Mnemonic::RmReg, Mnemonic::RegImm(OperandSize::DWORD)]
+    );
+    map.insert(
+        Instruction::mnemonic(op, OperandSize::DWORD, &[OperandType::Mem, OperandType::Imm]),
+        vec![opcode, Mnemonic::ModRm(im << 3), Mnemonic::Mem, Mnemonic::RegImm(OperandSize::DWORD)]
+    );
+
+    map.insert(
+        Instruction::mnemonic(op, OperandSize::QWORD, &[OperandType::Reg, OperandType::Imm]),
+        vec![Mnemonic::Rex(0x48), opcode, Mnemonic::ModRm(im << 3), Mnemonic::RmReg, Mnemonic::RegImm(OperandSize::DWORD)]
+    );
+    map.insert(
+        Instruction::mnemonic(op, OperandSize::QWORD, &[OperandType::Mem, OperandType::Imm]),
+        vec![Mnemonic::Rex(0x48), opcode, Mnemonic::ModRm(im << 3), Mnemonic::Mem, Mnemonic::RegImm(OperandSize::DWORD)]
+    );
+}
+
+fn standard_instr(map :&mut HashMap<Instruction, Vec<Mnemonic>>, op : OperationType,
+                  rm_r8 : u8, r_rm8 : u8, rm_i8 : u8, rm_r : u8, r_rm : u8, rm_i : u8, im : u8
+) {
+    reg_rm_instr(map, op, Mnemonic::Opcode(r_rm));
+    rm_reg_instr(map, op, Mnemonic::Opcode(rm_r));
+    rm_imm_instr(map, op, Mnemonic::Opcode(rm_i), im);
+    map.insert(
+        Instruction::mnemonic(op, OperandSize::BYTE, &[OperandType::Reg, OperandType::Reg]),
+        vec![Mnemonic::Opcode(r_rm8), Mnemonic::ModRm(0), Mnemonic::RegReg, Mnemonic::RmReg]
+    );
+    map.insert(
+        Instruction::mnemonic(op, OperandSize::BYTE, &[OperandType::Reg, OperandType::Mem]),
+        vec![Mnemonic::Opcode(r_rm8), Mnemonic::ModRm(0), Mnemonic::RegReg, Mnemonic::Mem]
+    );
+    map.insert(
+        Instruction::mnemonic(op, OperandSize::BYTE, &[OperandType::Mem, OperandType::Reg]),
+        vec![Mnemonic::Opcode(rm_r8), Mnemonic::ModRm(0), Mnemonic::Mem, Mnemonic::RegReg]
+    );
+
+    map.insert(
+        Instruction::mnemonic(op, OperandSize::BYTE, &[OperandType::Reg, OperandType::Imm]),
+        vec![Mnemonic::Opcode(rm_i8), Mnemonic::ModRm(im << 3), Mnemonic::RmReg, Mnemonic::RegImm(OperandSize::BYTE)]
+    );
+    map.insert(
+        Instruction::mnemonic(op, OperandSize::BYTE, &[OperandType::Mem, OperandType::Imm]),
+        vec![Mnemonic::Opcode(rm_i8), Mnemonic::ModRm(im << 3), Mnemonic::Mem, Mnemonic::RegImm(OperandSize::BYTE)]
+    );
 }

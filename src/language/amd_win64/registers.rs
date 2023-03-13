@@ -1,6 +1,18 @@
 use crate::language::amd_win64::instruction::{Instruction, InstructionCompiler, InstructionOperand};
 use crate::language::amd_win64::operation::{Operand, OperandSize, OperationType};
 
+
+// Bitmaps of all locations an operand can be allocated at.
+// Registers are ordered in terms of priority, with higher values being allocated before lower ones.
+// The ordering is based on: prefer volatile registers, prefer avoiding rex-prefix, and lower rax
+//  a bit since it is required for many instructions, and is therefore good to keep free when possible.
+//
+// The invalidation checking + register hinting makes it so that allocations are not allocated
+//  in this order when it does not work well, this ordering is only a tiebreaker.
+//
+// These bitmaps are also used to determine what registers can be used for what operation.
+// Important that 2^1 is not a register, otherwise subtraction overflow in get_register()
+//  in case of empty bitmap.
 pub const MEM : u64 = 2_u64.pow(0);
 pub const R15 : u64 = 2_u64.pow(1);
 pub const R14 : u64 = 2_u64.pow(2);
@@ -30,8 +42,14 @@ pub const NON_VOL_GEN_REG : u64 = RBX | RBP | RDI | RSI | R12 | R13 | R14 | R15;
 pub const GEN_REG : u64 = VOL_GEN_REG | NON_VOL_GEN_REG;
 pub const MEM_GEN_REG : u64 = GEN_REG | MEM;
 
+// Represents a single register during allocation.
 struct Register {
-    bitmap : u64, operand : Option<usize>, encoding : u8
+    // The bitmap matching this register
+    bitmap : u64,
+    // index to the MemoryAllocation the operand using this register has, None if this register is free.
+    operand : Option<usize>,
+    // 4 bit value, how this register is represented by the processor.
+    encoding : u8
 }
 
 impl Register {
@@ -44,7 +62,7 @@ pub struct RegisterState {
     registers : Vec<Register>,
     memory : Vec<bool>,
     allocations : Vec<MemoryAllocation>,
-    free_gen : u64,
+    free_gen : u64, // Bitmap of all free general purpose registers
     pub output : Vec<Instruction>
 }
 
@@ -70,6 +88,8 @@ enum MemoryAllocation {
 }
 
 impl MemoryAllocation {
+    // Returns the size of this allocation.
+    // Used when moving a previous allocation to memory.
     fn size(&self) -> OperandSize {
         match self {
             MemoryAllocation::Register(_, size) |
@@ -106,6 +126,7 @@ impl RegisterState {
             Register::new_general(R14, 0b1110),
             Register::new_general(R15, 0b1111)
         ];
+        // All operands have a 0-initialized id field, make sure this means no allocation.
         let allocations = vec![MemoryAllocation::None];
         RegisterState {
             registers, memory : Vec::new(), allocations, free_gen : GEN_REG,
@@ -113,6 +134,8 @@ impl RegisterState {
         }
     }
 
+    // Returns the index in the register list of the highest priority register in bitmap,
+    //  or None if the bitmap has no registers in it.
     fn get_register(bitmap : u64) -> Option<usize> {
         Some(match bitmap & (u64::MAX << (63 - (bitmap | 1).leading_zeros())) {
             RCX => 0, RDX => 1, RAX => 2,
@@ -129,7 +152,7 @@ impl RegisterState {
     }
 
 
-
+    // Finds a memory location large enough for size, marks it as taken and returns the index.
     fn get_memory(&mut self, size : OperandSize) -> usize {
         for i in (0..self.memory.len()).step_by(size as usize) {
             if self.memory[i..].iter().take(size as usize).all(|b|!*b) {
