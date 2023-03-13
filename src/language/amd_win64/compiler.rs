@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use bumpalo::Bump;
-use crate::language::amd_win64::instruction::{BasicOperation, Instruction, InstructionCompiler, Operand, OperandSize, OperandType};
+use crate::language::amd_win64::instruction::InstructionCompiler;
+use crate::language::amd_win64::operation::{Operand, OperandSize, Operation, OperationType};
 use crate::language::amd_win64::registers::*;
 use crate::language::operator::{DualOperator, SingleOperator};
 use crate::language::parser::{Expression, ExpressionData, Statement, StatementData, Variable};
 use crate::language::types::Type;
-use crate::mnemonic;
 
 // Represents one function
 pub struct ProgramFrame {
@@ -16,7 +16,7 @@ pub struct ProgramFrame {
 
 
 pub struct InstructionBuilder <'a> {
-    instr : Vec<Instruction<'a>>,
+    operations: Vec<Operation<'a>>,
     invalidations : Vec<(usize, u64)>,
     operands : Vec<&'a Operand>,
     arena : &'a Bump,
@@ -33,58 +33,58 @@ impl <'a> InstructionBuilder <'a> {
         }).collect();
         let exit_code = vars.get("exit_code").unwrap().id.borrow().unwrap();
         InstructionBuilder {
-            instr : Vec::new(), invalidations : Vec::new(),
+            operations: Vec::new(), invalidations : Vec::new(),
             operands, arena, register_state, exit_code
         }
     }
 
     fn add_dual_operator(&mut self, locations : &mut Vec<&'a Operand>, first : usize, second : usize, size : OperandSize, t : Type, op : DualOperator) {
         if op.is_cmp() {
-            self.instr.push(Instruction::new(BasicOperation::Cmp,
-                                             vec![locations[first], locations[second]],
-                                             None));
+            self.operations.push(Operation::new(OperationType::Cmp,
+                                                vec![locations[first], locations[second]],
+                                                None));
             let basic_operator = match op {
-                DualOperator::Equal => BasicOperation::SetE,
-                DualOperator::NotEqual => BasicOperation::SetNe,
-                DualOperator::GreaterEqual => if t.is_signed() {BasicOperation::SetGE } else {BasicOperation::SetAE},
-                DualOperator::LesserEqual => if t.is_signed() {BasicOperation::SetLE} else {BasicOperation::SetBE},
-                DualOperator::Greater => if t.is_signed() {BasicOperation::SetG } else {BasicOperation::SetA},
-                DualOperator::Lesser => if t.is_signed() {BasicOperation::SetL } else {BasicOperation::SetB},
+                DualOperator::Equal => OperationType::SetE,
+                DualOperator::NotEqual => OperationType::SetNe,
+                DualOperator::GreaterEqual => if t.is_signed() { OperationType::SetGE } else { OperationType::SetAE},
+                DualOperator::LesserEqual => if t.is_signed() { OperationType::SetLE} else { OperationType::SetBE},
+                DualOperator::Greater => if t.is_signed() { OperationType::SetG } else { OperationType::SetA},
+                DualOperator::Lesser => if t.is_signed() { OperationType::SetL } else { OperationType::SetB},
                 _ => unreachable!("Not is_cmp")
             };
             let dest =  self.arena.alloc(Operand::local(size));
             let oper = self.arena.alloc(Operand::local(size));
             locations.push(dest);
-            self.instr.push(Instruction::new(basic_operator, vec![oper], Some(dest)));
+            self.operations.push(Operation::new(basic_operator, vec![oper], Some(dest)));
         } else {
             let operator = match op {
                 DualOperator::Divide => {
-                    self.invalidations.push((self.instr.len(), RDX | RAX));
-                    if t.is_signed() {BasicOperation::IDiv } else {BasicOperation::Div }
+                    self.invalidations.push((self.operations.len(), RDX | RAX));
+                    if t.is_signed() { OperationType::IDiv } else { OperationType::Div }
                 },
                 DualOperator::Multiply => if t.is_signed() {
                     if size == OperandSize::BYTE {
-                        self.invalidations.push((self.instr.len(), RAX));
+                        self.invalidations.push((self.operations.len(), RAX));
                     }
-                    BasicOperation::IMul
+                    OperationType::IMul
                 } else {
                     if size == OperandSize::BYTE {
-                        self.invalidations.push((self.instr.len(), RAX));
+                        self.invalidations.push((self.operations.len(), RAX));
                     } else {
-                        self.invalidations.push((self.instr.len(), RDX | RAX));
+                        self.invalidations.push((self.operations.len(), RDX | RAX));
                     }
 
-                    BasicOperation::Mul
+                    OperationType::Mul
                 },
-                DualOperator::Minus => BasicOperation::Sub,
-                DualOperator::Plus => BasicOperation::Add,
-                DualOperator::BoolAnd => BasicOperation::And,
-                DualOperator::BoolOr => BasicOperation::Or,
+                DualOperator::Minus => OperationType::Sub,
+                DualOperator::Plus => OperationType::Add,
+                DualOperator::BoolAnd => OperationType::And,
+                DualOperator::BoolOr => OperationType::Or,
                 _ => unreachable!("Covered by is_cmp")
             };
             let new = self.arena.alloc(Operand::local(size));
             locations.push(new);
-            self.instr.push(Instruction::new(
+            self.operations.push(Operation::new(
                 operator, vec![locations[first], locations[second]], Some(new)
             ));
         }
@@ -97,8 +97,8 @@ impl <'a> InstructionBuilder <'a> {
                 let new2 = self.arena.alloc(Operand::new(0, OperandSize::BYTE));
                 self.register_state.allocate_imm(new2, 1, OperandSize::BYTE);
                 locations.push(new);
-                self.instr.push(Instruction::new(
-                    BasicOperation::Xor,
+                self.operations.push(Operation::new(
+                    OperationType::Xor,
                     vec![locations[expr], new2], Some(new))
                 );
             }
@@ -108,7 +108,7 @@ impl <'a> InstructionBuilder <'a> {
 
     fn add_assigment(&mut self, dest : &Variable, expr : &Vec<ExpressionData>) {
         let mut locations = Vec::with_capacity(expr.len());
-        let prev_len = self.instr.len();
+        let prev_len = self.operations.len();
         for e in expr.iter() {
             match e.expression {
                 Expression::Variable(v) => {
@@ -116,13 +116,13 @@ impl <'a> InstructionBuilder <'a> {
                     locations.push(self.operands[id].clone());
                 },
                 Expression::Operator { first, operator, second } => {
-                    locations[first].add_use(self.instr.len());
-                    locations[second].add_use(self.instr.len());
+                    locations[first].add_use(self.operations.len());
+                    locations[second].add_use(self.operations.len());
                     let size = OperandSize::from(e.t);
                     self.add_dual_operator(&mut locations, first, second, size, expr[first].t, operator);
                 }
                 Expression::SingleOperator { operator, expr } => {
-                    locations[expr].add_use(self.instr.len());
+                    locations[expr].add_use(self.operations.len());
                     self.add_single_operator(&mut locations, expr, operator);
                 }
                 Expression::IntLiteral(val) => {
@@ -141,15 +141,15 @@ impl <'a> InstructionBuilder <'a> {
         let index = dest.id.borrow().unwrap();
         let new_dest = self.arena.alloc(Operand::local(OperandSize::from(dest.var_type)));
         self.operands[index] = new_dest;
-        if prev_len ==  self.instr.len() { // Whole expression was only a variable or immediate value.
+        if prev_len ==  self.operations.len() { // Whole expression was only a variable or immediate value.
             let operand = *locations.last().unwrap();
-            operand.add_use(self.instr.len());
+            operand.add_use(self.operations.len());
             let first = self.arena.alloc(Operand::local(OperandSize::from(dest.var_type)));
 
-            let instruction = Instruction::new(BasicOperation::Mov,
-                                               vec![first, operand], Some(new_dest));
-            self.instr.push(instruction);
-        } else if let Some(instruction) =  self.instr.last_mut() {
+            let instruction = Operation::new(OperationType::Mov,
+                                             vec![first, operand], Some(new_dest));
+            self.operations.push(instruction);
+        } else if let Some(instruction) =  self.operations.last_mut() {
             instruction.dest = Some(new_dest);
         }
     }
@@ -162,15 +162,15 @@ impl <'a> InstructionBuilder <'a> {
         }
         let exit = self.operands[self.exit_code];
         let out = self.arena.alloc(Operand::local(exit.size));
-        exit.add_use(self.instr.len());
-        self.instr.push(Instruction::new(BasicOperation::MovRet, vec![exit], Some(out)));
+        exit.add_use(self.operations.len());
+        self.operations.push(Operation::new(OperationType::MovRet, vec![exit], Some(out)));
         self
     }
 
     pub fn compile(&mut self) {
         // Allocate hints for what registers should be used
         // Allows e.g using rax if later instruction uses mul
-        for instruction in self.instr.iter() {
+        for instruction in self.operations.iter() {
             for (i, &operand) in instruction.operands.iter().enumerate() {
                 let hint = instruction.operator.bitmap_hint(i, operand.size);
                 self.register_state.allocate_hint(operand, hint);
@@ -184,7 +184,7 @@ impl <'a> InstructionBuilder <'a> {
         let mut invalidation = 0;
         let mut used_stable = 0_u64;
 
-        for (index, instruction) in self.instr.iter_mut().enumerate() {
+        for (index, operation) in self.operations.iter_mut().enumerate() {
             let mut invalid_now = 0;
             if let Some((i, map)) = self.invalidations.get(invalidation) {
                 if *i == index {
@@ -194,7 +194,7 @@ impl <'a> InstructionBuilder <'a> {
             }
 
             // Get bitmap of registers that will be invalidated while dest is still needed.
-            let mut invalid_soon = if let Some(dest) = instruction.dest {
+            let mut invalid_soon = if let Some(dest) = operation.dest {
                 self.invalidations[invalidation..].iter()
                     .take_while(|(i, _)| dest.used_after(*i))
                     .fold(0, |prev, (_, map)| *map | prev)
@@ -203,9 +203,9 @@ impl <'a> InstructionBuilder <'a> {
             };
 
             let mut bitmap = 1;
-            let destroyed = instruction.operator.destroyed();
-            for (i, operand) in instruction.operands.iter_mut().enumerate() {
-                bitmap = instruction.operator.next_bitmap(
+            let destroyed = operation.operator.destroyed();
+            for (i, operand) in operation.operands.iter_mut().enumerate() {
+                bitmap = operation.operator.next_bitmap(
                     bitmap, i, operand.size
                 );
 
@@ -220,7 +220,7 @@ impl <'a> InstructionBuilder <'a> {
                     // In that case no move is needed.
                     if location != allocation_bitmap {
                         println!("Mov0 {}, {}", self.register_state.to_string(new.id.get()), self.register_state.to_string(operand.id.get()));
-                        self.register_state.compile_instruction(BasicOperation::Mov, &[new, operand]);
+                        self.register_state.build_instruction(OperationType::Mov, &[new, operand]);
                     }
                     allocation_bitmap = location;
 
@@ -244,39 +244,42 @@ impl <'a> InstructionBuilder <'a> {
 
             self.register_state.invalidate_registers(invalid_now);
             let mut free = true;
-            if let Some(dest) = instruction.dest {
+            if let Some(dest) = operation.dest {
                 if self.register_state.is_free(dest) {
-                    instruction.operands.first().unwrap().merge_into(dest);
+                    operation.operands.first().unwrap().merge_into(dest);
                 } else {
                     used_stable |= self.register_state.allocation_bitmap(dest) & NON_VOL_GEN_REG;
                     free = false;
                 }
             }
-            print!("{:?}", instruction.operator);
-            for o in &instruction.operands {
+            print!("{:?}", operation.operator);
+            for o in &operation.operands {
                 print!(" {}", self.register_state.to_string(o.id.get()));
             }
             println!();
-            self.register_state.compile_instruction(instruction.operator, &instruction.operands);
+            self.register_state.build_instruction(operation.operator, &operation.operands);
 
-            if let Some(dest) = instruction.dest {
+            if let Some(dest) = operation.dest {
                 if !free {
-                    let first = *instruction.operands.first().unwrap();
+                    let first = *operation.operands.first().unwrap();
                     println!("Mov1 {}, {}", self.register_state.to_string(dest.id.get()), self.register_state.to_string(first.id.get()));
-                    self.register_state.compile_instruction(BasicOperation::Mov, &[dest, first]);
+                    self.register_state.build_instruction(OperationType::Mov, &[dest, first]);
                 }
             }
-            for &operand in &instruction.operands {
+            for &operand in &operation.operands {
                 if !operand.used_after(index) {
                     self.register_state.free(operand);
                 }
             }
-
-
-
         }
 
-        std::fs::write("out.bin", &self.register_state.output).unwrap();
+        let compiler = InstructionCompiler::new();
+        let mut res = Vec::new();
+        for instruction in &self.register_state.output {
+            compiler.compile_instruction(instruction, &mut res);
+        }
+
+        std::fs::write("out.bin", &res).unwrap();
 
         println!();
     }

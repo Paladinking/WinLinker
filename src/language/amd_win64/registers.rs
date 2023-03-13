@@ -1,5 +1,5 @@
-use crate::language::amd_win64::instruction::{BasicOperation, InstructionCompiler, OperandType};
-use super::instruction::{Operand, OperandSize};
+use crate::language::amd_win64::instruction::{Instruction, InstructionCompiler, InstructionOperand};
+use crate::language::amd_win64::operation::{Operand, OperandSize, OperationType};
 
 pub const MEM : u64 = 2_u64.pow(0);
 pub const R15 : u64 = 2_u64.pow(1);
@@ -31,11 +31,11 @@ pub const GEN_REG : u64 = VOL_GEN_REG | NON_VOL_GEN_REG;
 pub const MEM_GEN_REG : u64 = GEN_REG | MEM;
 
 struct Register {
-    bitmap : u64, operand : Option<usize>, encoding : u64
+    bitmap : u64, operand : Option<usize>, encoding : u8
 }
 
 impl Register {
-    fn new_general(bitmap : u64, encoding : u64) -> Register {
+    fn new_general(bitmap : u64, encoding : u8) -> Register {
         Register {bitmap, operand : None, encoding}
     }
 }
@@ -45,8 +45,7 @@ pub struct RegisterState {
     memory : Vec<bool>,
     allocations : Vec<MemoryAllocation>,
     free_gen : u64,
-    pub output : Vec<u8>,
-    instruction_compiler : InstructionCompiler
+    pub output : Vec<Instruction>
 }
 
 pub fn register_string(bitmap : u64) -> &'static str {
@@ -85,7 +84,6 @@ impl MemoryAllocation {
             MemoryAllocation::Hint(_) | MemoryAllocation::None => panic!("Size on non allocation")
         }
     }
-
 }
 
 impl RegisterState {
@@ -111,7 +109,7 @@ impl RegisterState {
         let allocations = vec![MemoryAllocation::None];
         RegisterState {
             registers, memory : Vec::new(), allocations, free_gen : GEN_REG,
-            instruction_compiler : InstructionCompiler::new(), output : Vec::new()
+            output : Vec::new()
         }
     }
 
@@ -148,40 +146,29 @@ impl RegisterState {
         return self.memory.len() - size as usize;
     }
 
-    fn allocation_type(&self, id : usize) -> OperandType {
-        match self.allocations[id] {
-            MemoryAllocation::Register(_, _) => OperandType::Reg,
-            MemoryAllocation::Memory(_, _) => OperandType::Mem,
-            MemoryAllocation::Immediate(_, _) => OperandType::Imm,
-            MemoryAllocation::Hint(_) | MemoryAllocation::None => panic!("No allocation")
-        }
-    }
-
-    fn get_val(&self, id : usize) -> u64 {
+    fn get_val(&self, id : usize) -> InstructionOperand {
         match self.allocations[id] {
             MemoryAllocation::Register(i, _) => {
-                self.registers[i].encoding
+                InstructionOperand::Reg(self.registers[i].encoding)
             }
             MemoryAllocation::Memory(i, _) => {
-                i as u64
+                InstructionOperand::Mem(i as u32)
             }
             MemoryAllocation::Immediate(val, _) => {
-                val
+                InstructionOperand::Imm(val)
             }
             MemoryAllocation::Hint(_) | MemoryAllocation::None => panic!("No allocation")
         }
     }
 
-    pub fn compile_instruction(&mut self, operation : BasicOperation, operands : &[&Operand]) {
+    pub fn build_instruction(&mut self, operation : OperationType, operands : &[&Operand]) {
         let size = operands[0].size;
-        let mnemonic = operands.iter().rev().fold(0, |m, &operand|
-            m << 8 | (self.allocation_type(operand.id.get()) as u64)
-        );
         // Need to collect to avoid borrowing self, probably fix.
-        let vals : Vec<u64> = operands.iter().map(|o| self.get_val(o.id.get())).collect();
-        self.instruction_compiler.compile_instruction(
-            operation, size, mnemonic, &mut vals.into_iter(), &mut self.output
-        );
+        let vals : Vec<_> = operands.iter().map(|o|
+            self.get_val(o.id.get())
+        ).collect();
+        self.output.push(Instruction::new(operation, size, vals));
+
     }
 
     // Allocates a location for operand to a location contained in bitmap.
@@ -237,13 +224,9 @@ impl RegisterState {
         }
 
         let bitmap = allocate_reg(self, location, operand);
-        let mnemonic = self.allocation_type(prev_owner) as u64 |
-            ((self.allocation_type(operand.id.get()) as u64) << 8);
-        let vals = [self.get_val(prev_owner), self.get_val(operand.id.get())];
+        let vals = vec![self.get_val(prev_owner), self.get_val(operand.id.get())];
         println!("Mov3 {}, {}", self.to_string(prev_owner), self.to_string(operand.id.get()));
-        self.instruction_compiler.compile_instruction(
-            BasicOperation::Mov, operand.size, mnemonic, &mut vals.into_iter(), &mut self.output
-        );
+        self.output.push(Instruction::new(OperationType::Mov, operand.size, vals));
         return bitmap;
     }
 
@@ -272,7 +255,6 @@ impl RegisterState {
             if self.registers[i].bitmap & map != 0 {
                 if let Some(index) = self.registers[i].operand {
                     let s = self.to_string(index);
-                    let mut mnematic = (self.allocation_type(index) as u64) << 8;
                     let val = self.get_val(index);
                     let size = self.allocations[index].size();
                     // Try to find free register, if none exists use memory
@@ -280,16 +262,12 @@ impl RegisterState {
                         self.allocations[index] = MemoryAllocation::Register(reg, size);
                         self.registers[reg].operand = Some(index);
                         self.free_gen &= !self.registers[reg].bitmap;
-                        mnematic |= (OperandType::Reg as u64);
                     } else {
                         let mem = self.get_memory(size);
                         self.allocations[index] = MemoryAllocation::Memory(mem, size);
-                        mnematic |= (OperandType::Mem as u64);
                     }
                     println!("Move3 {}, {}", self.to_string(index), s);
-                    self.instruction_compiler.compile_instruction(BasicOperation::Mov, size, mnematic,
-                    &mut [self.get_val(index), val].into_iter(), &mut self.output);
-
+                    self.output.push(Instruction::new(OperationType::Mov, size, vec![self.get_val(index), val]));
                     self.registers[i].operand = None;
                     self.free_gen |= self.registers[i].bitmap;
                 }
