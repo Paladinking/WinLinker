@@ -190,6 +190,7 @@ impl <'a> InstructionBuilder <'a> {
         let mut used_stable = 0_u64;
 
         for (index, operation) in self.operations.iter_mut().enumerate() {
+            // Get bitmap of all registers invalidated by this instruction
             let mut invalid_now = 0;
             if let Some((i, map)) = self.invalidations.get(invalidation) {
                 if *i == index {
@@ -237,9 +238,10 @@ impl <'a> InstructionBuilder <'a> {
                 if destroyed & (1 << i) != 0 {
                     used_stable |= allocation_bitmap & NON_VOL_GEN_REG
                 }
+                // Only the first operand uses invalid_soon, since that is the destination register
                 invalid_soon = 0;
                 // If this operand is going to be freed there is no need to invalidate it.
-                // I cannot be freed until after invalidation is done since otherwise
+                // It cannot be freed until after invalidation is done since otherwise
                 //  they might be overridden while saving needed invalidated registers.
                 if !operand.used_after(index) {
                     invalid_now &= !allocation_bitmap;
