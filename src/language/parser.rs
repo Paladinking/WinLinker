@@ -1,13 +1,17 @@
+mod expression_builder;
+mod parse_error;
+
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter, Debug};
+use std::rc::Rc;
 use bumpalo::Bump;
 use std::str::FromStr;
 use crate::language::amd_win64::compiler::InstructionBuilder;
-use crate::language::expression_builder::ExpressionBuilder;
 use crate::language::operator::{DualOperator, SingleOperator};
+use crate::language::parser::expression_builder::ExpressionBuilder;
 use crate::language::types::Type;
-use crate::language::parse_error::{ParseError, ParseErrorType};
+use parse_error::{ParseError, ParseErrorType};
 
 
 #[derive(Debug)]
@@ -27,16 +31,9 @@ impl Variable {
     }
 }
 
-impl PartialEq for Variable {
-    fn eq(&self, other: &Self) -> bool {
-        return std::ptr::eq(self, other);
-    }
-}
-
-
 #[derive(Debug)]
-pub enum Expression <'a> {
-    Variable(&'a Variable),
+pub enum Expression {
+    Variable(Rc<Variable>),
     Operator {first : usize, operator : DualOperator, second : usize},
     SingleOperator {operator : SingleOperator, expr :  usize},
     IntLiteral(u64),
@@ -45,14 +42,14 @@ pub enum Expression <'a> {
 }
 
 #[derive(Debug)]
-pub struct ExpressionData<'a> {
-    pub expression : Expression<'a>,
+pub struct ExpressionData {
+    pub expression : Expression,
     pub t : Type,
     pub pos : (usize, usize)
 }
 
-impl <'a> ExpressionData<'a> {
-    pub fn new(e : Expression<'a>, pos : (usize, usize)) -> ExpressionData<'a>{
+impl ExpressionData {
+    pub fn new(e : Expression, pos : (usize, usize)) -> ExpressionData{
         ExpressionData {
             expression : e,
             t : Type::Any,
@@ -61,7 +58,7 @@ impl <'a> ExpressionData<'a> {
     }
 }
 
-impl <'a> Display for Expression<'a> {
+impl Display for Expression {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match &self {
             Expression::Variable(v) => f.write_fmt(format_args!("{:?}", v.var_type)),
@@ -76,17 +73,17 @@ impl <'a> Display for Expression<'a> {
     }
 }
 
-pub enum Statement <'a>{
-    Assignment {var : &'a Variable, expr : Vec<ExpressionData<'a>>}
+pub enum Statement {
+    Assignment {var : Rc<Variable>, expr : Vec<ExpressionData>}
 }
 
-pub struct StatementData<'a> {
-    pub(crate) statement : Statement<'a>,
+pub struct StatementData {
+    pub(crate) statement : Statement,
     pos : (usize, usize)
 }
 
-impl <'a> StatementData<'a> {
-    fn new(statement : Statement<'a>, pos : (usize, usize)) -> StatementData<'a> {
+impl StatementData {
+    fn new(statement : Statement, pos : (usize, usize)) -> StatementData {
         StatementData {
             statement,
             pos
@@ -94,15 +91,15 @@ impl <'a> StatementData<'a> {
     }
 }
 
-struct Program <'a> {
-    statements : Vec<StatementData<'a>>
+struct Program {
+    variables : HashMap<String, Rc<Variable>>,
+    statements : Vec<StatementData>
 }
 
 struct Parser<'a> {
     chars : std::str::Chars<'a>,
-    arena : &'a Bump,
     types : HashMap<String, Type>,
-    variables : HashMap<String, &'a Variable>,
+    variables : HashMap<String, Rc<Variable>>,
     row : usize,
     col : usize,
     cr : bool
@@ -114,14 +111,13 @@ impl <'a>Parser<'a> {
     const SPACES : [char; 4] = ['\t', '\n', '\r', ' '];
     const KEYWORDS : [&'static str; 2] = ["start", "end"];
 
-    fn new(data : &'a str, arena : &'a Bump) -> Parser<'a> {
+    fn new(data : &'a str) -> Parser<'a> {
         let types = Type::create_primitives();
-        let mut variables : HashMap<String, &Variable> = HashMap::new();
-        variables.insert("exit_code".to_owned(), arena.alloc(Variable::new(Type::U32)));
+        let mut variables : HashMap<String, Rc<Variable>> = HashMap::new();
+        variables.insert("exit_code".to_owned(), Rc::new(Variable::new(Type::U32)));
         let chars = data.chars();
         Parser {
             chars,
-            arena,
             types,
             variables,
             row : 0,
@@ -219,7 +215,7 @@ impl <'a>Parser<'a> {
         }
         self.variables.insert(
             name.to_owned(),
-            self.arena.alloc(Variable::new(t))
+            Rc::new(Variable::new(t))
         );
         Ok(())
     }
@@ -253,7 +249,7 @@ impl <'a>Parser<'a> {
         return operator;
     }
 
-    fn parse_expression<'b>(&'b mut self, expressions : &mut Vec<ExpressionData<'a>>) -> Result<(), ParseError> {
+    fn parse_expression(&mut self, expressions : &mut Vec<ExpressionData>) -> Result<(), ParseError> {
         self.skip_while(|c| Parser::SPACES.contains(c));
         let mut builder = ExpressionBuilder::new();
         loop {
@@ -283,8 +279,8 @@ impl <'a>Parser<'a> {
                         expr = Expression::BoolLiteral(true);
                     } else if word == "false" {
                         expr =Expression::BoolLiteral(false);
-                    } else if let Some(&var) = self.variables.get(word) {
-                        expr = Expression::Variable(var);
+                    } else if let Some(var) = self.variables.get(word) {
+                        expr = Expression::Variable(var.clone());
                     } else {
                         return Err(ParseError::new_at(
                             ParseErrorType::UnexpectedLiteral(word.to_owned()), row, col));
@@ -311,25 +307,78 @@ impl <'a>Parser<'a> {
         Ok(())
     }
 
+    fn parse_declarations(&mut self) -> Result<(), ParseError> {
+        loop {
+            let word = self.read_word()?;
+            match word {
+                "start" => return Ok(()),
+                word => {
+                    if let Some(&t) = self.types.get(word) {
+                        let name = self.read_word()?;
+                        self.add_variable(name, t)?;
+                        self.assert_char(';')?;
+                    } else {
+                        return Err(ParseError::new(
+                            ParseErrorType::UnknownType(word.to_owned()),
+                            self.get_pos()
+                        ));
+                    }
+                }
+            }
+        }
+
+    }
+
+    pub fn parse(mut self) -> Result<Program, ParseError> {
+        self.parse_declarations()?;
+        let mut statements = Vec::new();
+        loop {
+            let pos = self.get_pos();
+            let word = self.read_word()?;
+            if word == "end" {
+                break;
+            }
+            let var = self.variables.get(word).ok_or_else(||
+                ParseError::new(ParseErrorType::UnexpectedLiteral(word.to_owned()), pos)
+            )?.clone();
+            let (row, col) = self.get_pos();
+            self.assert_char('=')?;
+            let mut expressions = Vec::new();
+            self.parse_expression(&mut expressions)?;
+            self.assert_char(';')?;
+            statements.push(StatementData::new(Statement::Assignment {
+                var,
+                expr : expressions
+            }, (row, col - word.chars().count())));
+        }
+        for statement in &mut statements {
+            self.type_validate(statement)?;
+        }
+
+        Ok(Program {
+            statements, variables : self.variables
+        })
+    }
+
     pub(crate) fn type_validate(&self, statement: &mut StatementData) -> Result<(), ParseError> {
         match &mut statement.statement {
             Statement::Assignment {var,expr} => {
                 let mut target_types = Vec::with_capacity(expr.len());
                 for e in expr.iter_mut() {
                     let err_map = |(t1, t2)| ParseError::new(ParseErrorType::TypeError(t1, t2), e.pos);
-                    let t = match e.expression {
+                    let t = match &e.expression {
                         Expression::Variable(v) => {
                             v.var_type
                         }
                         Expression::Operator { first, second, operator } => {
-                            operator.resolve_type(&target_types[first], &target_types[second])
+                            operator.resolve_type(&target_types[*first], &target_types[*second])
                                 .map_err(err_map)?
                         }
                         Expression::SingleOperator { operator, expr} => {
-                            operator.resolve_type(&target_types[expr]).map_err(err_map)?
+                            operator.resolve_type(&target_types[*expr]).map_err(err_map)?
                         }
                         Expression::IntLiteral(val) => {
-                            match val {
+                            match *val {
                                 0..=4294967295 => Type::AnyInt,
                                 _ => return Err(ParseError::new(ParseErrorType::InvalidLiteral(val.to_string()), e.pos))
                             }
@@ -370,69 +419,18 @@ impl <'a>Parser<'a> {
     }
 }
 
-
-
-fn parse_declarations<'a> (parser : &mut Parser) -> Result<(), ParseError> {
-    loop {
-        let word = parser.read_word()?;
-        match word {
-            "start" => return Ok(()),
-            word => {
-                if let Some(&t) = parser.types.get(word) {
-                    let name = parser.read_word()?;
-                    parser.add_variable(name, t)?;
-                    parser.assert_char(';')?;
-                } else {
-                    return Err(ParseError::new(
-                        ParseErrorType::UnknownType(word.to_owned()),
-                        parser.get_pos()
-                    ));
-                }
-            }
-        }
-    }
-}
-
-fn parse_program(mut parser : Parser) -> Result<Program, ParseError> {
-    parse_declarations(&mut parser)?;
-    let mut statements = Vec::new();
-    loop {
-        let pos = parser.get_pos();
-        let word = parser.read_word()?;
-        if word == "end" {
-            break;
-        }
-        let var = *parser.variables.get(word).ok_or_else(||
-            ParseError::new(ParseErrorType::UnexpectedLiteral(word.to_owned()), pos)
-        )?;
-        let (row, col) = parser.get_pos();
-        parser.assert_char('=')?;
-        let mut expressions = Vec::new();
-        parser.parse_expression(&mut expressions)?;
-        parser.assert_char(';')?;
-        statements.push(StatementData::new(Statement::Assignment {
-            var,
-            expr : expressions
-        }, (row, col - word.chars().count())));
-    }
-    for statement in &mut statements {
-        parser.type_validate(statement)?;
-    }
-    InstructionBuilder::new(parser.arena, &parser.variables)
-        .with(&statements).compile();
-    println!("{:?}", parser.variables);
-    Ok(Program {
-        statements
-    })
-}
-
 pub fn read_program(file : String) {
     let arena = Bump::new();
     let data = std::fs::read_to_string(file).unwrap();
-    let program = parse_program(
-        Parser::new(&data, &arena)
-    );
-    if let Err(e) = program {
-        println!("{}", e);
-    }
+    let program = Parser::new(&data).parse();
+    let program = match program {
+        Ok(program) => program,
+        Err(e) => {
+            println!("{}", e);
+            return;
+        }
+    };
+    InstructionBuilder::new(&arena, &program.variables)
+        .with(&program.statements).compile();
+
 }

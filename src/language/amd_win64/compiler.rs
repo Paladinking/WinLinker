@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use std::rc::Rc;
 use bumpalo::Bump;
-use crate::language::amd_win64::instruction::InstructionCompiler;
-use crate::language::amd_win64::operation::{Operand, OperandSize, Operation, OperationType};
-use crate::language::amd_win64::registers::*;
+use super::instruction::InstructionCompiler;
+use super::operation::{Operand, OperandSize, Operation, OperationType};
+use super::registers::*;
 use crate::language::operator::{DualOperator, SingleOperator};
 use crate::language::parser::{Expression, ExpressionData, Statement, StatementData, Variable};
 use crate::language::types::Type;
@@ -25,7 +26,7 @@ pub struct InstructionBuilder <'a> {
 }
 
 impl <'a> InstructionBuilder <'a> {
-    pub fn new<'b> (arena : &'a Bump, vars: &'b HashMap<String, &Variable>) -> InstructionBuilder<'a> {
+    pub fn new<'b> (arena : &'a Bump, vars: &'b HashMap<String, Rc<Variable>>) -> InstructionBuilder<'a> {
         let register_state = RegisterState::new();
         let operands = vars.iter().enumerate().map(|(i, (_, v))|{
             v.id.replace(Some(i));
@@ -110,29 +111,29 @@ impl <'a> InstructionBuilder <'a> {
         let mut locations = Vec::with_capacity(expr.len());
         let prev_len = self.operations.len();
         for e in expr.iter() {
-            match e.expression {
+            match &e.expression {
                 Expression::Variable(v) => {
                     let id = v.id.get().unwrap();
                     locations.push(self.operands[id].clone());
                 },
                 Expression::Operator { first, operator, second } => {
-                    locations[first].add_use(self.operations.len());
-                    locations[second].add_use(self.operations.len());
+                    locations[*first].add_use(self.operations.len());
+                    locations[*second].add_use(self.operations.len());
                     let size = OperandSize::from(e.t);
-                    self.add_dual_operator(&mut locations, first, second, size, expr[first].t, operator);
+                    self.add_dual_operator(&mut locations, *first, *second, size, expr[*first].t, *operator);
                 }
                 Expression::SingleOperator { operator, expr } => {
-                    locations[expr].add_use(self.operations.len());
-                    self.add_single_operator(&mut locations, expr, operator);
+                    locations[*expr].add_use(self.operations.len());
+                    self.add_single_operator(&mut locations, *expr, *operator);
                 }
                 Expression::IntLiteral(val) => {
                     let new = self.arena.alloc(Operand::new(0, OperandSize::from(e.t)));
-                    self.register_state.allocate_imm(new, val, OperandSize::from(e.t));
+                    self.register_state.allocate_imm(new, *val, OperandSize::from(e.t));
                     locations.push(new);
                 }
                 Expression::BoolLiteral(b) => {
                     let new = self.arena.alloc(Operand::new(0, OperandSize::BYTE));
-                    self.register_state.allocate_imm(new, if b {1} else {0}, OperandSize::BYTE);
+                    self.register_state.allocate_imm(new, if *b {1} else {0}, OperandSize::BYTE);
                     locations.push(new);
                 }
                 Expression::None => unreachable!("Should not exist ever.")
@@ -154,10 +155,10 @@ impl <'a> InstructionBuilder <'a> {
         }
     }
 
-    pub fn with(mut self, statements : &Vec<StatementData<'a>>) -> Self {
+    pub fn with(mut self, statements : &Vec<StatementData>) -> Self {
         for statement in statements {
             match &statement.statement { Statement::Assignment { var, expr } => {
-                self.add_assigment(*var, &expr);
+                self.add_assigment(var, &expr);
             }}
         }
         let exit = self.operands[self.exit_code];

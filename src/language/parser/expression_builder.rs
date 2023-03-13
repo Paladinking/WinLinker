@@ -1,25 +1,25 @@
-use crate::language::parser::{Expression, ExpressionData};
+use super::{Expression, ExpressionData};
 use std::cmp::Ordering;
-use crate::language::operator::{SingleOperator, DualOperator};
+use crate::language::operator::{DualOperator, SingleOperator};
 
 
-enum ExpressionBuilderType <'a>{
-    Atom(Expression<'a>),
+enum ExpressionBuilderType{
+    Atom(Expression),
     SingleOperator(SingleOperator),
     DualOperator(DualOperator)
 }
 
 
-struct ExpressionBuilderNode<'a> {
-    expression_type: ExpressionBuilderType<'a>,
+struct ExpressionBuilderNode {
+    expression_type: ExpressionBuilderType,
     par : usize,
-    parent : *mut ExpressionBuilderNode<'a>,
-    first_child : *mut ExpressionBuilderNode<'a>,
-    second_child : *mut ExpressionBuilderNode<'a>,
+    parent : *mut ExpressionBuilderNode,
+    first_child : *mut ExpressionBuilderNode,
+    second_child : *mut ExpressionBuilderNode,
     pos : (usize, usize)
 }
 
-impl <'a> ExpressionBuilderNode<'a> {
+impl ExpressionBuilderNode {
     fn priority(&self) -> isize {
         match self.expression_type {
             ExpressionBuilderType::Atom(_) => isize::MIN,
@@ -29,21 +29,21 @@ impl <'a> ExpressionBuilderNode<'a> {
     }
 }
 
-impl <'a> Eq for ExpressionBuilderNode<'a> {}
+impl Eq for ExpressionBuilderNode {}
 
-impl <'a> PartialEq for ExpressionBuilderNode<'a> {
+impl PartialEq for ExpressionBuilderNode {
     fn eq(&self, other: &Self) -> bool {
         self.priority() == other.priority() && self.par == other.par
     }
 }
 
-impl <'a> Ord for ExpressionBuilderNode<'a> {
+impl Ord for ExpressionBuilderNode {
     fn cmp(&self, other: &Self) -> Ordering {
         self.partial_cmp(other).unwrap()
     }
 }
 
-impl<'a> PartialOrd for ExpressionBuilderNode<'a> {
+impl PartialOrd for ExpressionBuilderNode {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         let par_cmp = other.par.cmp(&self.par);
         if par_cmp.is_eq() {
@@ -54,14 +54,14 @@ impl<'a> PartialOrd for ExpressionBuilderNode<'a> {
     }
 }
 
-pub(crate) struct ExpressionBuilder <'a> {
-    root : *mut ExpressionBuilderNode<'a>,
+pub(crate) struct ExpressionBuilder {
+    root : *mut ExpressionBuilderNode,
     open_paren : Vec<usize>,
-    prev : *mut ExpressionBuilderNode<'a>
+    prev : *mut ExpressionBuilderNode
 }
 
-impl<'a> ExpressionBuilder <'a> {
-    pub(crate) fn new() -> ExpressionBuilder<'a> {
+impl ExpressionBuilder {
+    pub(crate) fn new() -> ExpressionBuilder {
         let root = Box::into_raw(Box::new( ExpressionBuilderNode {
             expression_type : ExpressionBuilderType::SingleOperator(SingleOperator::Pass),
             par : 0,
@@ -81,7 +81,7 @@ impl<'a> ExpressionBuilder <'a> {
         return self.open_paren.is_empty()
     }
 
-    pub(crate) fn into_expression(self, expressions : &mut Vec<ExpressionData<'a>>) {
+    pub(crate) fn into_expression(self, expressions : &mut Vec<ExpressionData>) {
         let mut res : usize = 0;
         let val = unsafe { // Root never changes, is always valid
             if (*self.root).second_child.is_null() {
@@ -138,7 +138,7 @@ impl<'a> ExpressionBuilder <'a> {
         Ok(())
     }
 
-    pub(crate) fn add_atom(&mut self, expr : Expression<'a>, pos : (usize, usize)) {
+    pub(crate) fn add_atom(&mut self, expr : Expression, pos : (usize, usize)) {
         let atom = Box::into_raw(Box::new(ExpressionBuilderNode {
             expression_type: ExpressionBuilderType::Atom(expr),
             par: self.open_paren.len(),

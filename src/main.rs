@@ -1,5 +1,3 @@
-extern crate core;
-
 use std::io::Result;
 
 mod portable_executable;

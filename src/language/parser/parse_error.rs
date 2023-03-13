@@ -3,7 +3,7 @@ use std::fmt::{Debug, Display, Formatter};
 use crate::language::types::Type;
 
 #[derive(Debug)]
-pub(super) enum ParseErrorType {
+pub(in crate::language) enum ParseErrorType {
     UnexpectedCharacter(char),
     UnexpectedLiteral(String),
     UnknownType(String),
@@ -36,7 +36,7 @@ impl Display for ParseErrorType {
     }
 }
 
-pub(super) struct ParseError {
+pub(in crate::language) struct ParseError {
     error_type : ParseErrorType,
     pos : (usize, usize)
 }
