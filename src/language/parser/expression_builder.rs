@@ -57,7 +57,8 @@ impl PartialOrd for ExpressionBuilderNode {
 pub(crate) struct ExpressionBuilder {
     root : *mut ExpressionBuilderNode,
     open_paren : Vec<usize>,
-    prev : *mut ExpressionBuilderNode
+    prev : *mut ExpressionBuilderNode,
+    nodes : usize
 }
 
 impl ExpressionBuilder {
@@ -73,7 +74,8 @@ impl ExpressionBuilder {
         ExpressionBuilder {
             root,
             open_paren : Vec::new(),
-            prev : root
+            prev : root,
+            nodes : 0
         }
     }
 
@@ -81,7 +83,7 @@ impl ExpressionBuilder {
         return self.open_paren.is_empty()
     }
 
-    pub(crate) fn into_expression(self, expressions : &mut Vec<ExpressionData>) {
+    pub(crate) fn into_expression(self) -> Vec<ExpressionData> {
         let mut res : usize = 0;
         let val = unsafe { // Root never changes, is always valid
             if (*self.root).second_child.is_null() {
@@ -90,6 +92,7 @@ impl ExpressionBuilder {
             (*self.root).second_child
         };
         let mut stack = vec![(val, &mut res as *mut usize)];
+        let mut expressions = Vec::with_capacity(self.nodes);
         while let Some((top, dest)) = stack.pop() {
             let mut top = unsafe {Box::from_raw(top)}; // Tree is valid
             match &mut top.expression_type {
@@ -127,6 +130,7 @@ impl ExpressionBuilder {
                 }
             }
         }
+        expressions
     }
 
     pub(crate) fn open_parentheses(&mut self) {
@@ -153,6 +157,7 @@ impl ExpressionBuilder {
             }
             (*self.prev).second_child = atom;
         }
+        self.nodes += 1;
         self.prev = atom;
     }
 
@@ -171,6 +176,7 @@ impl ExpressionBuilder {
             }
             (*self.prev).second_child = node;
         }
+        self.nodes += 1;
         self.prev = node;
     }
 
@@ -198,6 +204,7 @@ impl ExpressionBuilder {
             (*node).parent = owner;
             (*node).pos = (*(*node).first_child).pos;
         }
+        self.nodes += 1;
         self.prev = node;
     }
 }

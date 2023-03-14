@@ -74,7 +74,8 @@ impl Display for Expression {
 }
 
 pub enum Statement {
-    Assignment {var : Rc<Variable>, expr : Vec<ExpressionData>}
+    Assignment {var : Rc<Variable>, expr : Vec<ExpressionData>},
+    //IfBlock {statements : Vec<Statement>, condition : Expression}
 }
 
 pub struct StatementData {
@@ -109,7 +110,7 @@ struct Parser<'a> {
 
 impl <'a>Parser<'a> {
     const SPACES : [char; 4] = ['\t', '\n', '\r', ' '];
-    const KEYWORDS : [&'static str; 2] = ["start", "end"];
+    const KEYWORDS : [&'static str; 3] = ["start", "end", "if"];
 
     fn new(data : &'a str) -> Parser<'a> {
         let types = Type::create_primitives();
@@ -249,12 +250,13 @@ impl <'a>Parser<'a> {
         return operator;
     }
 
-    fn parse_expression(&mut self, expressions : &mut Vec<ExpressionData>) -> Result<(), ParseError> {
+    fn parse_expression(&mut self) -> Result<Vec<ExpressionData>, ParseError> {
         self.skip_while(|c| Parser::SPACES.contains(c));
         let mut builder = ExpressionBuilder::new();
         loop {
-            let (row, col) = self.get_pos();
+            let (mut row, mut col) = self.get_pos();
             let next = self.peek_char().ok_or_else(||ParseError::new(ParseErrorType::EOF, (row, col)))?;
+            (row, col) = self.get_pos();
             let expr;
             match next {
                 '!' => {
@@ -287,7 +289,7 @@ impl <'a>Parser<'a> {
                     }
                 }
             };
-            builder.add_atom(expr, self.get_pos());
+            builder.add_atom(expr, (row, col));
             while let Some(')') = self.peek_char() {
                 if let Err(_) = builder.close_parentheses() {
                     break;
@@ -303,8 +305,7 @@ impl <'a>Parser<'a> {
         if !builder.is_complete() {
             return Err(ParseError::new(ParseErrorType::UnmatchedParen, self.get_pos()));
         }
-        builder.into_expression(expressions);
-        Ok(())
+        Ok(builder.into_expression())
     }
 
     fn parse_declarations(&mut self) -> Result<(), ParseError> {
@@ -326,8 +327,22 @@ impl <'a>Parser<'a> {
                 }
             }
         }
-
     }
+
+    /*fn parse_statement(&mut self) -> Result<StatementData, ParseError> {
+        let pos = self.get_pos();
+        let word = self.read_word()?;
+        match word {
+            "if" => {
+                let expression = self.parse_expression()?;
+
+            }
+
+
+
+        }
+        Ok(Statement::IfBlock {statements : Vec::new()})
+    }*/
 
     pub fn parse(mut self) -> Result<Program, ParseError> {
         self.parse_declarations()?;
@@ -335,21 +350,31 @@ impl <'a>Parser<'a> {
         loop {
             let pos = self.get_pos();
             let word = self.read_word()?;
+            match word {
+                "end" => break,
+                "if" => {
+
+                },
+                _ => { // Default to assignment.
+                    let var = self.variables.get(word).ok_or_else(||
+                        ParseError::new(ParseErrorType::UnexpectedLiteral(word.to_owned()), pos)
+                    )?.clone();
+                    let (row, col) = self.get_pos();
+                    self.assert_char('=')?;
+                    let expressions = self.parse_expression()?;
+                    self.assert_char(';')?;
+                    statements.push(StatementData::new(Statement::Assignment {
+                        var,
+                        expr : expressions
+                    }, (row, col - word.chars().count())));
+                }
+
+            }
             if word == "end" {
                 break;
             }
-            let var = self.variables.get(word).ok_or_else(||
-                ParseError::new(ParseErrorType::UnexpectedLiteral(word.to_owned()), pos)
-            )?.clone();
-            let (row, col) = self.get_pos();
-            self.assert_char('=')?;
-            let mut expressions = Vec::new();
-            self.parse_expression(&mut expressions)?;
-            self.assert_char(';')?;
-            statements.push(StatementData::new(Statement::Assignment {
-                var,
-                expr : expressions
-            }, (row, col - word.chars().count())));
+
+
         }
         for statement in &mut statements {
             self.type_validate(statement)?;
@@ -433,4 +458,102 @@ pub fn read_program(file : String) {
     InstructionBuilder::new(&arena, &program.variables)
         .with(&program.statements).compile();
 
+}
+
+#[cfg(test)]
+mod tests {
+    use std::rc::Rc;
+    use crate::language::operator::DualOperator;
+    use crate::language::parser::{Expression, Parser, Statement};
+    use crate::language::types::Type;
+
+    #[test]
+    fn parse_empty() {
+        let data = "start\nend";
+        let parser = Parser::new(data);
+        let res = parser.parse();
+        assert!(res.is_ok(), "Failed parsing empty program");
+        let res = res.unwrap();
+        assert!(res.statements.is_empty(), "Got statement from empty program");
+        assert!(res.variables.get("exit_code").is_some(), "Missing exit code in empty program");
+        assert_eq!(res.variables.len(), 1, "Extra variables in empty program");
+    }
+
+    #[test]
+    fn parse_simple() {
+        let data = "u32 x\n;u32 y;\nstart\nx=10    ;y   =\t 20;\r\nexit_code=x+y;end";
+        let parser = Parser::new(data);
+        let res = parser.parse();
+        assert!(res.is_ok(), "Failed parsing simple program");
+        let res = res.unwrap();
+        assert_eq!(res.statements.len(), 3, "Expected 3 statements, got {}", res.statements.len());
+        assert!(res.variables.get("x").is_some(), "Missing x variable");
+        assert_eq!(res.variables.get("x").unwrap().var_type, Type::U32, "Wrong type on x, expected U32, got {}",
+                   res.variables.get("x").unwrap().var_type);
+        assert!(res.variables.get("y").is_some(), "Missing y variable");
+        assert_eq!(res.variables.get("y").unwrap().var_type, Type::U32, "Wrong type on y, expected U32, got {}",
+                   res.variables.get("y").unwrap().var_type);
+        assert_eq!(res.variables.len(), 3, "Expected 3 variables, got {}", res.variables.len());
+        let first = &res.statements[0];
+        let second = &res.statements[1];
+        let third = &res.statements[2];
+        assert_eq!(first.pos, (3, 0));
+        assert_eq!(second.pos, (3, 9));
+        assert_eq!(third.pos, (4, 0));
+        match &first.statement {
+            Statement::Assignment { var, expr } => {
+                assert!(Rc::ptr_eq(var, res.variables.get("x").unwrap()));
+                assert_eq!(expr.len(), 1);
+                let expr = &expr[0];
+                assert_eq!(expr.pos, (3, 2));
+                match &expr.expression {
+                    Expression::IntLiteral(val) => {
+                        assert_eq!(*val, 10);
+                    }
+                    e => panic!("Expected IntLiteral, got {:?}", e)
+                }
+            }
+        }
+        match &second.statement {
+            Statement::Assignment { var, expr } => {
+                assert!(Rc::ptr_eq(var, res.variables.get("y").unwrap()));
+                assert_eq!(expr.len(), 1);
+                let expr = &expr[0];
+                assert_eq!(expr.pos, (3, 16));
+                match &expr.expression {
+                    Expression::IntLiteral(val) => {
+                        assert_eq!(*val, 20);
+                    }
+                    e => panic!("Expected IntLiteral, got {:?}", e)
+                }
+            }
+        }
+        match &third.statement {
+            Statement::Assignment { var, expr } => {
+                assert!(Rc::ptr_eq(var, res.variables.get("exit_code").unwrap()));
+                assert_eq!(expr.len(), 3);
+                let e1 = &expr[0];
+                let e2 = &expr[1];
+                assert_eq!(e1.pos, (4, 10));
+                assert_eq!(e2.pos, (4, 12));
+                match (&e1.expression, &e2.expression) {
+                    (Expression::Variable(v1), Expression::Variable(v2)) => {
+                        assert!(Rc::ptr_eq(v1, res.variables.get("x").unwrap()));
+                        assert!(Rc::ptr_eq(v2, res.variables.get("y").unwrap()));
+                    },
+                    (e1, e2) => panic!("Expected variables, got {:?}, {:?}", e1, e2)
+                }
+                let e3 = &expr[2];
+                assert_eq!(e3.pos, (4, 10));
+                match &e3.expression {
+                    Expression::Operator { first, second, operator } => {
+                        assert_eq!(*operator as usize, DualOperator::Plus as usize);
+                        assert_eq!(*first, 0);
+                        assert_eq!(*second, 1);
+                    }
+                    e => panic!("Expected operator, got {:?}", e)
+                }
+            }
+        }
+    }
 }
