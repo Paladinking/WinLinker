@@ -73,13 +73,26 @@ impl Display for Expression {
     }
 }
 
+#[derive(Debug)]
 pub enum Statement {
     Assignment {var : Rc<Variable>, expr : Vec<ExpressionData>},
-    //IfBlock {statements : Vec<Statement>, condition : Expression}
+    IfBlock {condition : Vec<ExpressionData>, statements : Vec<StatementData>}
 }
 
+impl Statement {
+    fn add_statements(&mut self, new_statements : Vec<StatementData>) {
+        match self {
+            Statement::Assignment { .. } => panic!("Does not have statements"),
+            Statement::IfBlock { ref mut statements, .. } => {
+                *statements = new_statements;
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct StatementData {
-    pub(crate) statement : Statement,
+    pub statement : Statement,
     pos : (usize, usize)
 }
 
@@ -329,113 +342,138 @@ impl <'a>Parser<'a> {
         }
     }
 
-    /*fn parse_statement(&mut self) -> Result<StatementData, ParseError> {
-        let pos = self.get_pos();
-        let word = self.read_word()?;
-        match word {
-            "if" => {
-                let expression = self.parse_expression()?;
-
+    fn parse_statements(&mut self) -> Result<Vec<StatementData>, ParseError> {
+        let mut targets : Vec<Vec<StatementData>> = vec![Vec::new()];
+        let mut statements : Vec<StatementData> = Vec::new();
+        loop {
+            let pos = self.get_pos();
+            let c = self.peek_char()
+                .ok_or_else(||ParseError::new(ParseErrorType::EOF, pos))?;
+            match c {
+                '}' => {
+                    if statements.is_empty() { // Was last closing '}'
+                        return Ok(targets.pop().unwrap());
+                    }
+                    let mut statement = statements.pop().unwrap();
+                    let mut block = targets.pop().unwrap();
+                    self.type_validate(&mut block)?;
+                    match &mut statement.statement {
+                        Statement::Assignment { .. } => return Err(ParseError::new(
+                            ParseErrorType::UnexpectedCharacter('}'), pos
+                        )),
+                        Statement::IfBlock { ref mut statements, .. } => {
+                            *statements = block;
+                        }
+                    }
+                    targets.last_mut().unwrap().push(statement);
+                },
+                _ => {
+                    let word = self.read_word()?;
+                    match word {
+                        "if" => {
+                            let expression = self.parse_expression()?;
+                            self.assert_char('{')?;
+                            statements.push(StatementData::new(
+                                Statement::IfBlock {
+                                    statements : Vec::new(),
+                                    condition: expression,
+                                }, pos));
+                            targets.push(Vec::new());
+                        },
+                        _ => {
+                            let var = self.variables.get(word).ok_or_else(||
+                                ParseError::new(ParseErrorType::UnexpectedLiteral(word.to_owned()), pos)
+                            )?.clone();
+                            let (row, col) = self.get_pos();
+                            self.assert_char('=')?;
+                            let expressions = self.parse_expression()?;
+                            self.assert_char(';')?;
+                            targets.last_mut().unwrap().push(StatementData::new(Statement::Assignment {
+                                var,
+                                expr : expressions
+                            }, (row, col - word.chars().count())));
+                        }
+                    }
+                }
             }
-
-
-
         }
-        Ok(Statement::IfBlock {statements : Vec::new()})
-    }*/
+    }
 
     pub fn parse(mut self) -> Result<Program, ParseError> {
         self.parse_declarations()?;
-        let mut statements = Vec::new();
-        loop {
-            let pos = self.get_pos();
-            let word = self.read_word()?;
-            match word {
-                "end" => break,
-                "if" => {
-
-                },
-                _ => { // Default to assignment.
-                    let var = self.variables.get(word).ok_or_else(||
-                        ParseError::new(ParseErrorType::UnexpectedLiteral(word.to_owned()), pos)
-                    )?.clone();
-                    let (row, col) = self.get_pos();
-                    self.assert_char('=')?;
-                    let expressions = self.parse_expression()?;
-                    self.assert_char(';')?;
-                    statements.push(StatementData::new(Statement::Assignment {
-                        var,
-                        expr : expressions
-                    }, (row, col - word.chars().count())));
-                }
-
-            }
-            if word == "end" {
-                break;
-            }
-
-
-        }
-        for statement in &mut statements {
-            self.type_validate(statement)?;
-        }
+        self.assert_char('{')?;
+        let mut statements = self.parse_statements()?;
+        println!("{:?}", statements);
+        self.type_validate(&mut statements)?;
 
         Ok(Program {
             statements, variables : self.variables
         })
     }
 
-    pub(crate) fn type_validate(&self, statement: &mut StatementData) -> Result<(), ParseError> {
-        match &mut statement.statement {
-            Statement::Assignment {var,expr} => {
-                let mut target_types = Vec::with_capacity(expr.len());
-                for e in expr.iter_mut() {
-                    let err_map = |(t1, t2)| ParseError::new(ParseErrorType::TypeError(t1, t2), e.pos);
-                    let t = match &e.expression {
-                        Expression::Variable(v) => {
-                            v.var_type
-                        }
-                        Expression::Operator { first, second, operator } => {
-                            operator.resolve_type(&target_types[*first], &target_types[*second])
-                                .map_err(err_map)?
-                        }
-                        Expression::SingleOperator { operator, expr} => {
-                            operator.resolve_type(&target_types[*expr]).map_err(err_map)?
-                        }
-                        Expression::IntLiteral(val) => {
-                            match *val {
-                                0..=4294967295 => Type::AnyInt,
-                                _ => return Err(ParseError::new(ParseErrorType::InvalidLiteral(val.to_string()), e.pos))
-                            }
-
-                        },
-                        Expression::BoolLiteral(_) => Type::Bool,
-                        Expression::None => unreachable!("None expressions are only created for mem::replace")
-                    };
-                    target_types.push(t);
-                    e.t = t;
-                }
-                let t = target_types.last().unwrap().resolve(&var.var_type).map_err(
-                    |(t1, t2)| ParseError::new(
-                            ParseErrorType::TypeError(t1, t2),
-                            statement.pos))?;
-                *target_types.last_mut().unwrap() = t.finalize();
-                for (i, e) in expr.iter_mut().enumerate().rev() {
-                    e.t = target_types[i];
-                    match e.expression {
-                        Expression::Operator { first, operator, second } => {
-                            let (t1, t2) = operator.finalize_type(
-                                &e.t, &target_types[first], &target_types[second]);
-                            target_types[first] = t1;
-                            target_types[second] = t2;
-                        }
-                        Expression::SingleOperator { .. } => {}
-                        Expression::None => unreachable!("None expressions are only created for mem::replace"),
-                        _ => {}
+    fn type_validate(&self, statements: &mut Vec<StatementData>) -> Result<(), ParseError> {
+        fn validate_expression(expr : &mut Vec<ExpressionData>, full_type : &Type) -> Result<(), ParseError> {
+            let mut target_types = Vec::with_capacity(expr.len());
+            for e in expr.iter_mut() {
+                let err_map = |(t1, t2)| ParseError::new(ParseErrorType::TypeError(t1, t2), e.pos);
+                let t = match &e.expression {
+                    Expression::Variable(v) => {
+                        v.var_type
                     }
+                    Expression::Operator { first, second, operator } => {
+                        operator.resolve_type(&target_types[*first], &target_types[*second])
+                            .map_err(err_map)?
+                    }
+                    Expression::SingleOperator { operator, expr } => {
+                        operator.resolve_type(&target_types[*expr]).map_err(err_map)?
+                    }
+                    Expression::IntLiteral(val) => {
+                        match *val {
+                            0..=4294967295 => Type::AnyInt,
+                            _ => return Err(ParseError::new(ParseErrorType::InvalidLiteral(val.to_string()), e.pos))
+                        }
+                    },
+                    Expression::BoolLiteral(_) => Type::Bool,
+                    Expression::None => unreachable!("None expressions are only created for mem::replace")
+                };
+                target_types.push(t);
+                e.t = t;
+            }
+            let t = target_types.last().unwrap().resolve(full_type).map_err(
+                |(t1, t2)| ParseError::new(
+                    ParseErrorType::TypeError(t1, t2),
+                    expr.last().unwrap().pos))?;
+            *target_types.last_mut().unwrap() = t.finalize();
+            for (i, e) in expr.iter_mut().enumerate().rev() {
+                e.t = target_types[i];
+                match e.expression {
+                    Expression::Operator { first, operator, second } => {
+                        let (t1, t2) = operator.finalize_type(
+                            &e.t, &target_types[first], &target_types[second]);
+                        target_types[first] = t1;
+                        target_types[second] = t2;
+                    }
+                    Expression::SingleOperator { .. } => {}
+                    Expression::None => unreachable!("None expressions are only created for mem::replace"),
+                    _ => {}
+                }
+            }
+            Ok(())
+        }
+
+        for statement in statements {
+            match &mut statement.statement {
+                Statement::Assignment { var, expr } => {
+                    validate_expression(expr, &var.var_type)?;
+                },
+                Statement::IfBlock {// Block statements are type-validated on creation
+                    condition, ..
+                } => {
+                    validate_expression(condition, &Type::Bool)?;
                 }
             }
         }
+
         Ok(())
     }
 
@@ -469,7 +507,7 @@ mod tests {
 
     #[test]
     fn parse_empty() {
-        let data = "start\nend";
+        let data = "start{\n}end";
         let parser = Parser::new(data);
         let res = parser.parse();
         assert!(res.is_ok(), "Failed parsing empty program");
@@ -481,7 +519,7 @@ mod tests {
 
     #[test]
     fn parse_simple() {
-        let data = "u32 x\n;u32 y;\nstart\nx=10    ;y   =\t 20;\r\nexit_code=x+y;end";
+        let data = "u32 x\n;u32 y;\nstart{\nx=10    ;y   =\t 20;\r\nexit_code=x+y;}end";
         let parser = Parser::new(data);
         let res = parser.parse();
         assert!(res.is_ok(), "Failed parsing simple program");
@@ -512,7 +550,8 @@ mod tests {
                     }
                     e => panic!("Expected IntLiteral, got {:?}", e)
                 }
-            }
+            },
+            _ => panic!("Expected assigment")
         }
         match &second.statement {
             Statement::Assignment { var, expr } => {
@@ -526,7 +565,8 @@ mod tests {
                     }
                     e => panic!("Expected IntLiteral, got {:?}", e)
                 }
-            }
+            },
+            _ => panic!("Expected assigment")
         }
         match &third.statement {
             Statement::Assignment { var, expr } => {
@@ -553,7 +593,8 @@ mod tests {
                     }
                     e => panic!("Expected operator, got {:?}", e)
                 }
-            }
+            },
+            _ => panic!("Expected assigment")
         }
     }
 }

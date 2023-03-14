@@ -159,7 +159,7 @@ impl <'a> InstructionBuilder <'a> {
         for statement in statements {
             match &statement.statement { Statement::Assignment { var, expr } => {
                 self.add_assigment(var, &expr);
-            }}
+            }, _ => todo!()}
         }
         let exit = self.operands[self.exit_code];
         let out = self.arena.alloc(Operand::local(exit.size));

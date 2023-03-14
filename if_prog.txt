@@ -1,0 +1,16 @@
+u32 a;
+u32 b;
+bool c;
+start {
+    a = 10;
+    b = 20;
+    c = a * b > 15 * 15;
+    if a >= b && c {
+        a = 12 ;
+    }
+    exit_code = a;
+
+
+
+
+} end
