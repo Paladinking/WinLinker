@@ -7,10 +7,36 @@ start {
     c = a * b > 15 * 15;
     if a >= b && c {
         a = 12 ;
+    } else {
+        a = false;
     }
     exit_code = a;
+} end
 
+mov rax, 10
+mov REGB, 20
+mov REGC, rax
+mul REGB
+mov REGD, rax
+mov rax, 15
+mov REGE, 15
+mul REGE
+cmp REGD, rax
+jmpA AFTER_IF
+mov REGC, 12
+AFTER_IF:
+mov rax, REGC
 
-
-
+u32 a;
+u32 b;
+bool c;
+start {
+    b = 20;
+    c = b * b > 15 * 15;
+    if a >= b && c {
+        a = 12;
+    } else {
+        a = 10;
+    }
+    exit_code = a;
 } end

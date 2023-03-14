@@ -1,5 +1,6 @@
 mod expression_builder;
 mod parse_error;
+pub mod statement;
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -12,6 +13,7 @@ use crate::language::operator::{DualOperator, SingleOperator};
 use crate::language::parser::expression_builder::ExpressionBuilder;
 use crate::language::types::Type;
 use parse_error::{ParseError, ParseErrorType};
+use crate::language::parser::statement::{BlockParser, BlockStatementParser, IfBlockParser, Statement, StatementData};
 
 
 #[derive(Debug)]
@@ -73,37 +75,7 @@ impl Display for Expression {
     }
 }
 
-#[derive(Debug)]
-pub enum Statement {
-    Assignment {var : Rc<Variable>, expr : Vec<ExpressionData>},
-    IfBlock {condition : Vec<ExpressionData>, statements : Vec<StatementData>}
-}
 
-impl Statement {
-    fn add_statements(&mut self, new_statements : Vec<StatementData>) {
-        match self {
-            Statement::Assignment { .. } => panic!("Does not have statements"),
-            Statement::IfBlock { ref mut statements, .. } => {
-                *statements = new_statements;
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct StatementData {
-    pub statement : Statement,
-    pos : (usize, usize)
-}
-
-impl StatementData {
-    fn new(statement : Statement, pos : (usize, usize)) -> StatementData {
-        StatementData {
-            statement,
-            pos
-        }
-    }
-}
 
 struct Program {
     variables : HashMap<String, Rc<Variable>>,
@@ -116,7 +88,8 @@ struct Parser<'a> {
     variables : HashMap<String, Rc<Variable>>,
     row : usize,
     col : usize,
-    cr : bool
+    cr : bool,
+    mark : (std::str::Chars<'a>, usize, usize, bool)
 }
 
 
@@ -136,8 +109,20 @@ impl <'a>Parser<'a> {
             variables,
             row : 0,
             col : 0,
-            cr : false
+            cr : false,
+            mark : (data.chars(), 0, 0, false)
         }
+    }
+
+    fn mark(&mut self) {
+        self.mark = (self.chars.clone(), self.row, self.col, self.cr);
+    }
+
+    fn reset(&mut self) {
+        self.chars = self.mark.0.clone();
+        self.row = self.mark.1;
+        self.col = self.mark.2;
+        self.cr = self.mark.3;
     }
 
     fn advance(&mut self) -> Option<char>{
@@ -343,42 +328,35 @@ impl <'a>Parser<'a> {
     }
 
     fn parse_statements(&mut self) -> Result<Vec<StatementData>, ParseError> {
-        let mut targets : Vec<Vec<StatementData>> = vec![Vec::new()];
-        let mut statements : Vec<StatementData> = Vec::new();
+        let mut targets : Vec<Box<dyn BlockStatementParser>> = vec![
+            BlockParser::begin_block(self, self.get_pos())?
+        ];
         loop {
             let pos = self.get_pos();
             let c = self.peek_char()
                 .ok_or_else(||ParseError::new(ParseErrorType::EOF, pos))?;
             match c {
                 '}' => {
-                    if statements.is_empty() { // Was last closing '}'
-                        return Ok(targets.pop().unwrap());
-                    }
-                    let mut statement = statements.pop().unwrap();
-                    let mut block = targets.pop().unwrap();
-                    self.type_validate(&mut block)?;
-                    match &mut statement.statement {
-                        Statement::Assignment { .. } => return Err(ParseError::new(
-                            ParseErrorType::UnexpectedCharacter('}'), pos
-                        )),
-                        Statement::IfBlock { ref mut statements, .. } => {
-                            *statements = block;
+                    self.advance();
+                    if let Some(statement) = targets.last_mut().unwrap().end_block(self)? {
+                        targets.pop();
+                        if targets.is_empty() {
+                            if let Statement::Block(block) = statement.statement {
+                                return Ok(block);
+                            }
+                            unreachable!("Last target is BlockParser");
+                        } else {
+                            targets.last_mut().unwrap().add_statement(self, statement)?;
                         }
                     }
-                    targets.last_mut().unwrap().push(statement);
                 },
                 _ => {
                     let word = self.read_word()?;
                     match word {
                         "if" => {
-                            let expression = self.parse_expression()?;
-                            self.assert_char('{')?;
-                            statements.push(StatementData::new(
-                                Statement::IfBlock {
-                                    statements : Vec::new(),
-                                    condition: expression,
-                                }, pos));
-                            targets.push(Vec::new());
+                            targets.push(
+                                IfBlockParser::begin_block(self, pos)?
+                            );
                         },
                         _ => {
                             let var = self.variables.get(word).ok_or_else(||
@@ -388,10 +366,10 @@ impl <'a>Parser<'a> {
                             self.assert_char('=')?;
                             let expressions = self.parse_expression()?;
                             self.assert_char(';')?;
-                            targets.last_mut().unwrap().push(StatementData::new(Statement::Assignment {
-                                var,
-                                expr : expressions
-                            }, (row, col - word.chars().count())));
+                            let statement = Statement::Assignment {var, expr : expressions};
+                            let pos = (row, col - word.chars().count());
+                            targets.last_mut().unwrap()
+                                .add_statement(self, StatementData::new(statement, pos))?;
                         }
                     }
                 }
@@ -401,7 +379,6 @@ impl <'a>Parser<'a> {
 
     pub fn parse(mut self) -> Result<Program, ParseError> {
         self.parse_declarations()?;
-        self.assert_char('{')?;
         let mut statements = self.parse_statements()?;
         println!("{:?}", statements);
         self.type_validate(&mut statements)?;
@@ -466,11 +443,14 @@ impl <'a>Parser<'a> {
                 Statement::Assignment { var, expr } => {
                     validate_expression(expr, &var.var_type)?;
                 },
-                Statement::IfBlock {// Block statements are type-validated on creation
-                    condition, ..
-                } => {
-                    validate_expression(condition, &Type::Bool)?;
+                Statement::IfBlock (ref mut statement) => {
+                    for cond in statement.iter_mut().map(|s| &mut s.condition) {
+                        if let Some(cond) = cond {
+                            validate_expression(cond, &Type::Bool)?;
+                        }
+                    }
                 }
+                Statement::Block(_) => panic!("Should not exist (for now)...")
             }
         }
 

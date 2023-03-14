@@ -5,7 +5,8 @@ use super::instruction::InstructionCompiler;
 use super::operation::{Operand, OperandSize, Operation, OperationType};
 use super::registers::*;
 use crate::language::operator::{DualOperator, SingleOperator};
-use crate::language::parser::{Expression, ExpressionData, Statement, StatementData, Variable};
+use crate::language::parser::{Expression, ExpressionData, Variable};
+use crate::language::parser::statement::{Statement, StatementData};
 use crate::language::types::Type;
 
 // Represents one function
@@ -157,9 +158,12 @@ impl <'a> InstructionBuilder <'a> {
 
     pub fn with(mut self, statements : &Vec<StatementData>) -> Self {
         for statement in statements {
-            match &statement.statement { Statement::Assignment { var, expr } => {
-                self.add_assigment(var, &expr);
-            }, _ => todo!()}
+            match &statement.statement {
+                Statement::Assignment { var, expr } => {
+                    self.add_assigment(var, &expr);
+                },
+                _ => todo!()
+            }
         }
         let exit = self.operands[self.exit_code];
         let out = self.arena.alloc(Operand::local(exit.size));
