@@ -188,7 +188,7 @@ impl RegisterState {
         let size = operands[0].size;
         // Need to collect to avoid borrowing self, probably fix.
         let vals : Vec<_> = operands.iter().map(|o|
-            self.get_val(o.id.get())
+            self.get_val(o.allocation.get())
         ).collect();
         self.output.push(Instruction::new(operation, size, vals));
 
@@ -202,14 +202,14 @@ impl RegisterState {
         // Helper for allocating a register
         fn allocate_reg(state : &mut RegisterState, index : usize, operand : &Operand) -> u64 {
             state.registers[index].operand = Some(state.allocations.len());
-            operand.id.replace(state.allocations.len());
+            operand.allocation.replace(state.allocations.len());
             state.allocations.push(MemoryAllocation::Register(index, operand.size));
             state.free_gen &= !state.registers[index].bitmap;
             return state.registers[index].bitmap;
         }
 
         // Try to allocate to hinted + not invalidated register
-        if let MemoryAllocation::Hint(map) = self.allocations[operand.id.get()] {
+        if let MemoryAllocation::Hint(map) = self.allocations[operand.allocation.get()] {
             if let Some(index) = Self::get_register(map & bitmap & self.free_gen & !invalid_soon) {
                 return allocate_reg(self, index, operand);
             }
@@ -225,7 +225,7 @@ impl RegisterState {
         // Try to allocate to memory
         if bitmap & MEM != 0 {
             let index = self.get_memory(operand.size);
-            operand.id.replace(self.allocations.len());
+            operand.allocation.replace(self.allocations.len());
             self.allocations.push(MemoryAllocation::Memory(index, operand.size));
             return MEM;
         }
@@ -247,15 +247,15 @@ impl RegisterState {
         }
 
         let bitmap = allocate_reg(self, location, operand);
-        let vals = vec![self.get_val(prev_owner), self.get_val(operand.id.get())];
-        println!("Mov3 {}, {}", self.to_string(prev_owner), self.to_string(operand.id.get()));
+        let vals = vec![self.get_val(prev_owner), self.get_val(operand.allocation.get())];
+        println!("Mov3 {}, {}", self.to_string(prev_owner), self.to_string(operand.allocation.get()));
         self.output.push(Instruction::new(OperationType::Mov, operand.size, vals));
         return bitmap;
     }
 
     // Make register / memory used by operand available again.
     pub fn free(&mut self, operand : &Operand) {
-        match self.allocations[operand.id.get()] {
+        match self.allocations[operand.allocation.get()] {
             MemoryAllocation::Register(reg, _)=> {
                 self.registers[reg].operand = None;
                 self.free_gen |= self.registers[reg].bitmap;
@@ -266,7 +266,7 @@ impl RegisterState {
             MemoryAllocation::Immediate(..) => {},
             MemoryAllocation::Hint(_) | MemoryAllocation::None => panic!("Double free")
         }
-        self.allocations[operand.id.get()] = MemoryAllocation::None;
+        self.allocations[operand.allocation.get()] = MemoryAllocation::None;
     }
 
     // Move all allocations that are contained in map to some register not in map.
@@ -299,7 +299,7 @@ impl RegisterState {
     }
 
     pub fn is_free(&self, operand : &Operand) -> bool {
-        match self.allocations[operand.id.get()] {
+        match self.allocations[operand.allocation.get()] {
             MemoryAllocation::Register(_, _) | MemoryAllocation::Memory(_, _) |
             MemoryAllocation::Immediate(_, _) => false,
             MemoryAllocation::Hint(_) | MemoryAllocation::None => true
@@ -307,7 +307,7 @@ impl RegisterState {
     }
 
     pub fn allocation_bitmap(&self, operand : &Operand) -> u64 {
-        match self.allocations[operand.id.get()] {
+        match self.allocations[operand.allocation.get()] {
             MemoryAllocation::Register(i, _) => self.registers[i].bitmap,
             MemoryAllocation::Memory(_, _) => MEM,
             MemoryAllocation::Immediate(_, bitmap) => bitmap,
@@ -344,22 +344,22 @@ impl RegisterState {
             size = OperandSize::DWORD
         }
         self.allocations.push(MemoryAllocation::Immediate(imm, size.to_imm()));
-        operand.id.replace(self.allocations.len() - 1);
+        operand.allocation.replace(self.allocations.len() - 1);
     }
 
     // Adds a bitmap hint containing good registers to operand.
     // Tries to combine it with previous hints.
     pub fn allocate_hint(&mut self, operand : &Operand, hint : u64) {
-        if let MemoryAllocation::None = self.allocations[operand.id.get()] {
+        if let MemoryAllocation::None = self.allocations[operand.allocation.get()] {
             // Allocate new hint
             self.allocations.push(MemoryAllocation::Hint(hint));
-            operand.id.replace(self.allocations.len() - 1);
-        } else if let MemoryAllocation::Hint(ref mut prev_hint) = self.allocations[operand.id.get()] {
+            operand.allocation.replace(self.allocations.len() - 1);
+        } else if let MemoryAllocation::Hint(ref mut prev_hint) = self.allocations[operand.allocation.get()] {
             if *prev_hint & hint == 0 {
                 // If the old and new hint had no overlap two registers will have to be used
                 // Better to not destroy all hint information, allocate separate hint.
                 self.allocations.push(MemoryAllocation::Hint(hint));
-                operand.id.replace(self.allocations.len() - 1);
+                operand.allocation.replace(self.allocations.len() - 1);
             } else {
                 // Combine old and new hint
                 *prev_hint &= hint;
@@ -372,11 +372,11 @@ impl RegisterState {
         // Dest 'should' always be None now, but it might be an immediate or something at some point.
         // Make sure this assumption does not become wrong undetected.
         debug_assert!(
-            if let MemoryAllocation::None = self.allocations[dest.id.get()] { true } else { false }
+            if let MemoryAllocation::None = self.allocations[dest.allocation.get()] { true } else { false }
         );
 
-        if let MemoryAllocation::Hint(_) = self.allocations[source.id.get()] {
-            dest.id.replace(source.id.get());
+        if let MemoryAllocation::Hint(_) = self.allocations[source.allocation.get()] {
+            dest.allocation.replace(source.allocation.get());
         }
     }
 }

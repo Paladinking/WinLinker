@@ -106,36 +106,53 @@ impl From<Type> for OperandSize {
     }
 }
 
+pub struct IdTracker {
+    count: usize
+}
+
+impl IdTracker {
+    pub fn new() -> IdTracker {
+        IdTracker {count : 0}
+    }
+
+    pub fn get_id(&mut self) -> usize {
+        self.count += 1;
+        self.count - 1
+    }
+}
+
+
 #[derive(Debug)]
 pub struct Operand {
-    pub id : Cell<usize>, // Index of allocated MemoryLocation
+    pub allocation: Cell<usize>, // Index of allocated MemoryLocation
     pub size : OperandSize,
-    last_use : Cell<usize> // Index of the last usage of this operand in instructions vector
+    pub id : usize,
+    //last_use : Cell<usize> // Index of the last usage of this operand in instructions vector
 }
 
 
 impl Operand {
-    pub fn new(id : usize, size : OperandSize) -> Operand {
+    pub fn new(tracker : &mut IdTracker, size : OperandSize) -> Operand {
         Operand {
-            id : Cell::new(id), last_use : Cell::new(0), size
+            allocation: Cell::new(0), size, id : tracker.get_id()
         }
     }
 
-    pub fn local(size : OperandSize) -> Operand {
-        Self::new(0, size)
+    pub fn local(tracker : &mut IdTracker, size : OperandSize) -> Operand {
+        Self::new(tracker, size)
     }
 
-    pub fn add_use(&self, index : usize) {
+    /*pub fn add_use(&self, index : usize) {
         self.last_use.replace(index);
-    }
+    }*/
 
     pub(crate) fn used_after(&self, index: usize) -> bool {
-        index < self.last_use.get()
+        false//index < self.last_use.get()
     }
 
     pub(crate) fn merge_into(&self, other: &Operand) {
-        other.id.replace(self.id.get());
-        self.last_use.replace(other.last_use.get());
+        other.allocation.replace(self.allocation.get());
+        //self.last_use.replace(other.last_use.get());
     }
 }
 
