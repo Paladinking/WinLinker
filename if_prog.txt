@@ -8,7 +8,7 @@ start {
     if a >= b && c {
         a = 12 ;
     } else {
-        a = false;
+        a = 24;
     }
     exit_code = a;
 } end

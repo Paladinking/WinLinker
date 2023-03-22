@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use bumpalo::Bump;
 use crate::language::amd_win64::operation::IdTracker;
@@ -9,14 +9,6 @@ use crate::language::operator::{DualOperator, SingleOperator};
 use crate::language::parser::{Expression, ExpressionData, Variable};
 use crate::language::parser::statement::{IfStatement, Statement, StatementData};
 use crate::language::types::Type;
-
-// Represents one function
-pub struct ProgramFrame {
-    stack_size : usize,
-    saved_registers : u64,
-    binary : Vec<u8>,
-}
-
 
 pub enum OperationUnit <'a> {
     Operation(Operation<'a>), // Real operation
@@ -32,26 +24,29 @@ impl <'a> OperationUnit <'a> {
     }
 }
 
-
-pub struct InstructionBuilder <'a> {
-    operations: Vec<OperationUnit<'a>>,
-    invalidations : Vec<(usize, u64)>,
-    operands : Vec<&'a Operand>,
-    arena : &'a Bump,
-    register_state : RegisterState,
-    tracker : IdTracker,
-    exit_code : usize
-}
-
 trait BlockCompiler<'a> {
     fn begin<'b>(&'b mut self, builder: &mut InstructionBuilder) -> std::slice::Iter<'a, StatementData>;
 
-    fn end<'b>(&'b mut self, builder : &mut InstructionBuilder) -> Option<std::slice::Iter<'a, StatementData>>;
+    fn end<'b>(&'b mut self, builder : &mut InstructionBuilder, usages : HashMap<usize, usize>) -> Option<std::slice::Iter<'a, StatementData>>;
 }
 
 struct IfBlockBuilder<'a> {
     statements : &'a Vec<IfStatement>,
+    block_ids : Vec<usize>,
+    usages : HashSet<usize>,
     index : usize
+}
+
+impl <'a> IfBlockBuilder<'a> {
+    fn new(builder : &mut InstructionBuilder, statements : &'a Vec<IfStatement>) -> Self {
+        IfBlockBuilder {
+            statements,
+            //TODO use different tracker?
+            block_ids : statements.iter().map(|_| builder.tracker.get_id()).collect(),
+            usages : HashSet::new(),
+            index : 0
+        }
+    }
 }
 
 impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
@@ -59,7 +54,18 @@ impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
         self.statements[0].block.iter()
     }
 
-    fn end<'b>(&'b mut self, builder : &mut InstructionBuilder) -> Option<std::slice::Iter<'a, StatementData>> {
+    fn end<'b>(&'b mut self, builder : &mut InstructionBuilder, usages : HashMap<usize, usize>) -> Option<std::slice::Iter<'a, StatementData>> {
+        for (k, v) in usages {
+            if !self.usages.contains(&k) {
+                self.usages.insert(k);
+                // All alternative scopes have to use the same variables
+                // Insert a usage on row 0 for all scopes, meaning they will be freed immediately.
+                builder.usages.insert(k, self.block_ids.iter().map(|&id|(id, 0)).collect());
+            }
+            if self.usages.contains(&k) {
+                builder.usages.get_mut(&k).unwrap()[self.index] = (self.block_ids[self.index], v);
+            }
+        }
         self.index += 1;
         if let Some(s) = self.statements.get(self.index) {
             Some(s.block.iter())
@@ -67,6 +73,18 @@ impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
             None
         }
     }
+}
+
+pub struct InstructionBuilder <'a> {
+    operations: Vec<OperationUnit<'a>>,
+    invalidations : Vec<(usize, u64)>,
+    // Usages map, operand id to vec of (scope_id, operations_index).
+    usages : HashMap<usize, Vec<(usize, usize)>>,
+    operands : Vec<&'a Operand>,
+    arena : &'a Bump,
+    register_state : RegisterState,
+    tracker : IdTracker,
+    exit_code : usize
 }
 
 impl <'a> InstructionBuilder <'a> {
@@ -79,28 +97,14 @@ impl <'a> InstructionBuilder <'a> {
         }).collect();
         let exit_code = vars.get("exit_code").unwrap().id.get().unwrap();
         InstructionBuilder {
-            operations: Vec::new(), invalidations : Vec::new(),
+            operations: Vec::new(), invalidations : Vec::new(), usages : HashMap::new(),
             operands, arena, register_state, tracker, exit_code
         }
     }
 
     fn add_condition(&mut self, expr : &Vec<ExpressionData>, usages : &mut HashMap<usize, usize>) {
-        let mut locations = Vec::with_capacity(expr.len());
-        let mut stack = Vec::with_capacity(expr.len());
-        stack.push(expr.last().unwrap());
-        while let Some(expr) = stack.pop() {
-            match expr.expression {
-                Expression::Variable(v) => {
-                    let id = v.id.get().unwrap();
-                    locations.push(self.operands[id].clone());
-                }
-                Expression::Operator { .. } => {}
-                Expression::SingleOperator { .. } => {}
-                Expression::IntLiteral(_) => {}
-                Expression::BoolLiteral(_) => {}
-                Expression::None => {}
-            }
-        }
+        todo!();
+
     }
 
     fn add_dual_operator(&mut self, locations : &mut Vec<&'a Operand>, first : usize, second : usize, size : OperandSize, t : Type, op : DualOperator) {
@@ -192,11 +196,13 @@ impl <'a> InstructionBuilder <'a> {
                 }
                 &Expression::IntLiteral(val) => {
                     let new = self.arena.alloc(Operand::new(&mut self.tracker, OperandSize::from(e.t)));
+                    usages.insert(new.id, 0);
                     self.register_state.allocate_imm(new, val, OperandSize::from(e.t));
                     locations.push(new);
                 }
                 &Expression::BoolLiteral(b) => {
                     let new = self.arena.alloc(Operand::new(&mut self.tracker, OperandSize::BYTE));
+                    usages.insert(new.id, 0);
                     self.register_state.allocate_imm(new, if b {1} else {0}, OperandSize::BYTE);
                     locations.push(new);
                 }
@@ -206,13 +212,14 @@ impl <'a> InstructionBuilder <'a> {
         let index = dest.id.get().unwrap();
         let new_dest = self.arena.alloc(
             Operand::local(&mut self.tracker, OperandSize::from(dest.var_type)));
+        usages.insert(new_dest.id, 0);
         self.operands[index] = new_dest;
         if prev_len ==  self.operations.len() { // Whole expression was only a variable or immediate value.
             let operand = *locations.last().unwrap();
             usages.insert(operand.id, self.operations.len());
             let first = self.arena.alloc(
                 Operand::local(&mut self.tracker,OperandSize::from(dest.var_type)));
-
+            usages.insert(first.id, 0);
             let instruction = OperationUnit::operation(OperationType::Mov,
                                              vec![first, operand], Some(new_dest));
             self.operations.push(instruction);
@@ -226,6 +233,7 @@ impl <'a> InstructionBuilder <'a> {
     pub fn with(mut self, statements : &Vec<StatementData>) -> Self {
         let mut statement_stack = vec![(statements.iter(), HashMap::new())];
         let mut builder_stack = Vec::new();
+        let outer_scope_id = self.tracker.get_id();
         while let Some((iter, usage_map)) = statement_stack.last_mut() {
             if let Some(val) = iter.next() {
                 match &val.statement {
@@ -233,9 +241,9 @@ impl <'a> InstructionBuilder <'a> {
                         self.add_assigment(var, expr, usage_map);
                     }
                     Statement::IfBlock(if_statement) => {
-                        let mut builder : Box<dyn BlockCompiler> = Box::new(IfBlockBuilder {
-                            statements : if_statement, index : 0
-                        });
+                        let mut builder : Box<dyn BlockCompiler> = Box::new(
+                            IfBlockBuilder::new(&mut self, if_statement)
+                        );
                         statement_stack.push((builder.begin(&mut self), HashMap::new()));
                         builder_stack.push(builder);
                     }
@@ -244,31 +252,26 @@ impl <'a> InstructionBuilder <'a> {
             } else {
                 let (_, usages) = statement_stack.pop().unwrap();
                 if let Some(builder) = builder_stack.last_mut() {
-                    let parent_map = &mut statement_stack.last_mut().unwrap().1;
-                    for (k, v) in usages {
-                        parent_map.insert(k, v);
-                    }
-                    if let Some(iter) = builder.end(&mut self) {
+                    if let Some(iter) = builder.end(&mut self, usages) {
                         statement_stack.push((iter, HashMap::new()));
                     } else {
                         builder_stack.pop();
                     }
+                } else {
+                    for (k, v) in usages {
+                        self.usages.insert(k, vec![(outer_scope_id, v)]);
+                    }
+                    break;
                 }
             }
-
         }
-        for statement in statements {
-            match &statement.statement {
-                Statement::Assignment { var, expr } => {
-                    self.add_assigment(var, &expr, &mut HashMap::new());
-                },
-                _ => todo!()
-            }
-        }
+        println!("stack: {:?}", self.usages);
         let exit = self.operands[self.exit_code];
         let out = self.arena.alloc(Operand::local(&mut self.tracker,
                                                   exit.size));
-        //exit.add_use(self.operations.len());
+        self.usages.insert(exit.id, vec![(outer_scope_id, self.operations.len())]);
+        // An empty vector here will indicate used in some unknown scope, this is fine.
+        self.usages.insert(out.id, vec![]);
         self.operations.push(OperationUnit::operation(OperationType::MovRet, vec![exit], Some(out)));
         self
     }
@@ -294,6 +297,20 @@ impl <'a> InstructionBuilder <'a> {
     }
 
     pub fn compile(mut self) {
+        // Hope this gets compiled away, just for the borrow checker...
+
+        fn used_after(scope : usize, index : usize, usages : &HashMap<usize, Vec<(usize, usize)>>, operand : &Operand) -> bool {
+            if let Some(vec) = usages.get(&operand.id) {
+                if let Some(&(_, row)) = vec.iter().find(|(s, _)| *s == scope) {
+                    row > index
+                } else {
+                    true
+                }
+            } else {
+                false
+            }
+        }
+
         self.allocate_hints();
 
         let mut invalidation = 0;
@@ -326,7 +343,9 @@ impl <'a> InstructionBuilder <'a> {
 
             let mut bitmap = 1;
             let destroyed = operation.operator.destroyed();
+            println!("{:?} : index {}", operation.operator, index);
             for (i, operand) in operation.operands.iter_mut().enumerate() {
+                println!("i: {}", operand.id);
                 bitmap = operation.operator.next_bitmap(
                     bitmap, i, operand.size
                 );
@@ -335,7 +354,7 @@ impl <'a> InstructionBuilder <'a> {
                     self.register_state.allocate(*operand, bitmap & MEM_GEN_REG, invalid_now, invalid_soon);
                 }
                 let mut allocation_bitmap = self.register_state.allocation_bitmap(operand);
-                if (operand.used_after(index) && destroyed & (1 << i) != 0) || allocation_bitmap & bitmap == 0 {
+                if (used_after(0, index, &self.usages, operand) && destroyed & (1 << i) != 0) || allocation_bitmap & bitmap == 0 {
                     let new = self.arena.alloc(
                         Operand::local(&mut self.tracker,operand.size));
                     let location = self.register_state.allocate(new, bitmap & MEM_GEN_REG, invalid_now, invalid_soon);
@@ -347,7 +366,7 @@ impl <'a> InstructionBuilder <'a> {
                     }
                     allocation_bitmap = location;
 
-                    if !operand.used_after(index) {
+                    if !used_after(0, index, &self.usages, operand) {
                         self.register_state.free(operand);
                     }
                     *operand = new;
@@ -360,17 +379,18 @@ impl <'a> InstructionBuilder <'a> {
                 // If this operand is going to be freed there is no need to invalidate it.
                 // It cannot be freed until after invalidation is done since otherwise
                 //  they might be overridden while saving needed invalidated registers.
-                if !operand.used_after(index) {
+                if !used_after(0, index, &self.usages, operand){
                     invalid_now &= !allocation_bitmap;
                 }
                 bitmap = allocation_bitmap;
             }
-
             self.register_state.invalidate_registers(invalid_now);
             let mut free = true;
             if let Some(dest) = operation.dest {
                 if self.register_state.is_free(dest) {
-                    operation.operands.first().unwrap().merge_into(dest);
+                    let first = *operation.operands.first().unwrap();
+                    first.merge_into(dest);
+                    self.usages.insert(first.id, self.usages[&dest.id].clone());
                 } else {
                     used_stable |= self.register_state.allocation_bitmap(dest) & NON_VOL_GEN_REG;
                     free = false;
@@ -391,7 +411,7 @@ impl <'a> InstructionBuilder <'a> {
                 }
             }
             for &operand in &operation.operands {
-                if !operand.used_after(index) {
+                if !used_after(0, index, &self.usages, operand) {
                     self.register_state.free(operand);
                 }
             }
@@ -402,7 +422,6 @@ impl <'a> InstructionBuilder <'a> {
         for instruction in &self.register_state.output {
             compiler.compile_instruction(instruction, &mut res);
         }
-
         std::fs::write("out.bin", &res).unwrap();
 
         println!();

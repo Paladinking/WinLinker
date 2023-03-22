@@ -146,13 +146,12 @@ impl Operand {
         self.last_use.replace(index);
     }*/
 
-    pub(crate) fn used_after(&self, index: usize) -> bool {
+    /*pub(crate) fn used_after(&self, index: usize) -> bool {
         false//index < self.last_use.get()
-    }
+    }*/
 
     pub(crate) fn merge_into(&self, other: &Operand) {
         other.allocation.replace(self.allocation.get());
-        //self.last_use.replace(other.last_use.get());
     }
 }
 
