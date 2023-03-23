@@ -47,6 +47,10 @@ pub enum InstructionOperand {
     Imm(
         #[derivative(Hash="ignore", PartialEq="ignore")]
         u64
+    ),
+    Addr(
+        #[derivative(Hash="ignore", PartialEq="ignore")]
+        usize
     )
 }
 
@@ -97,6 +101,14 @@ impl Instruction {
         match self.operands[*i - 1] {
             InstructionOperand::Imm(val) => val,
             _ => panic!("Not an immediate operand")
+        }
+    }
+
+    fn get_addr(&self, i : &mut usize) -> usize {
+        *i += 1;
+        match self.operands[*i -1] {
+            InstructionOperand::Addr(addr) => addr,
+            _ => panic!("Not an address operand")
         }
     }
 }

@@ -82,7 +82,8 @@ pub fn register_string(bitmap : u64) -> &'static str {
 enum MemoryAllocation {
     Register(usize, OperandSize), // Represents a register
     Memory(usize, OperandSize), // Represents stack memory
-    Immediate(u64, u64), // Represents an immediate value
+    Immediate(u64, u64), // Represents an immediate value, (val, bitmap)
+    Address(usize), // Represents a jump label, containing an operand index.
     Hint(u64), // Hint with a bitmap containing good registers to allocate
     None // Unallocated
 }
@@ -101,6 +102,8 @@ impl MemoryAllocation {
                 IMM64 => OperandSize::QWORD,
                 _ => panic!("Bad immediate bitmap")
             },
+            // Not always correct, but no usage 'should' care
+            MemoryAllocation::Address(_) => OperandSize::QWORD,
             MemoryAllocation::Hint(_) | MemoryAllocation::None => panic!("Size on non allocation")
         }
     }
@@ -179,6 +182,9 @@ impl RegisterState {
             }
             MemoryAllocation::Immediate(val, _) => {
                 InstructionOperand::Imm(val)
+            },
+            MemoryAllocation::Address(adr) => {
+                InstructionOperand::Addr(adr)
             }
             MemoryAllocation::Hint(_) | MemoryAllocation::None => panic!("No allocation")
         }
@@ -301,7 +307,7 @@ impl RegisterState {
     pub fn is_free(&self, operand : &Operand) -> bool {
         match self.allocations[operand.allocation.get()] {
             MemoryAllocation::Register(_, _) | MemoryAllocation::Memory(_, _) |
-            MemoryAllocation::Immediate(_, _) => false,
+            MemoryAllocation::Immediate(_, _) | MemoryAllocation::Address(_)=> false,
             MemoryAllocation::Hint(_) | MemoryAllocation::None => true
         }
     }
@@ -311,6 +317,9 @@ impl RegisterState {
             MemoryAllocation::Register(i, _) => self.registers[i].bitmap,
             MemoryAllocation::Memory(_, _) => MEM,
             MemoryAllocation::Immediate(_, bitmap) => bitmap,
+            // Since no operation uses both imm and address values in the same slot,
+            // Addresses uses the IMM64 bitmap
+            MemoryAllocation::Address(_) => IMM64,
             MemoryAllocation::Hint(_) |
             MemoryAllocation::None => panic!("Allocation bitmap on non-allocated operand")
         }
@@ -327,13 +336,21 @@ impl RegisterState {
             MemoryAllocation::Immediate(i, _) => {
                 i.to_string()
             },
+            MemoryAllocation::Address(i) => {
+                "addr(".to_owned() + &i.to_string() + ")"
+            }
             MemoryAllocation::Hint(_) => {
                 "Hint".to_string()
-            }
+            },
             MemoryAllocation::None => {
                 "None".to_owned()
             }
         }
+    }
+
+    pub fn allocate_addr(&mut self, operand : &Operand, addr : usize) {
+        self.allocations.push(MemoryAllocation::Address(addr));
+        operand.allocation.replace(self.allocations.len() - 1);
     }
 
     // Allocates an immediate value for operand

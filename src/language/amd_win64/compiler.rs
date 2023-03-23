@@ -41,7 +41,6 @@ impl <'a> IfBlockBuilder<'a> {
     fn new(builder : &mut InstructionBuilder, statements : &'a Vec<IfStatement>) -> Self {
         IfBlockBuilder {
             statements,
-            //TODO use different tracker?
             block_ids : statements.iter().map(|_| builder.tracker.get_id()).collect(),
             usages : HashSet::new(),
             index : 0
@@ -50,7 +49,7 @@ impl <'a> IfBlockBuilder<'a> {
 }
 
 impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
-    fn begin<'b>(&'b mut self, builder : &mut InstructionBuilder) -> std::slice::Iter<'a, StatementData> {
+    fn begin<'b>(&'b mut self, _builder : &mut InstructionBuilder) -> std::slice::Iter<'a, StatementData> {
         self.statements[0].block.iter()
     }
 
@@ -104,7 +103,7 @@ impl <'a> InstructionBuilder <'a> {
 
     fn add_condition(&mut self, expr : &Vec<ExpressionData>, usages : &mut HashMap<usize, usize>) {
         todo!();
-
+        
     }
 
     fn add_dual_operator(&mut self, locations : &mut Vec<&'a Operand>, first : usize, second : usize, size : OperandSize, t : Type, op : DualOperator) {
@@ -297,8 +296,6 @@ impl <'a> InstructionBuilder <'a> {
     }
 
     pub fn compile(mut self) {
-        // Hope this gets compiled away, just for the borrow checker...
-
         fn used_after(scope : usize, index : usize, usages : &HashMap<usize, Vec<(usize, usize)>>, operand : &Operand) -> bool {
             if let Some(vec) = usages.get(&operand.id) {
                 if let Some(&(_, row)) = vec.iter().find(|(s, _)| *s == scope) {
