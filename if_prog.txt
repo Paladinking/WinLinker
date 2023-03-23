@@ -4,11 +4,13 @@ bool c;
 start {
     a = 10;
     b = 20;
-    c = a * b > 15 * 15;
-    if a >= b && c {
-        a = 12 ;
-    } else {
+    c = a * b > 15 * 16;
+    if a >= b && (c || b < 19) {
+        a = 12;
+    } else if c == false {
         a = 24;
+    } else {
+        a = 123;
     }
     exit_code = a;
 } end

@@ -10,8 +10,15 @@ pub enum OperandSize {
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum OperationType {
-    IMul, Mul, Add, Sub, IDiv, Div, Mov, Push, Pop, Cmp, SetE, SetNe, SetA, SetB, SetAE, SetBE, SetG, SetL,
-    SetGE, SetLE, And, Or, Xor, MovRet
+    IMul, Mul, IDiv, Div,
+    Add, Sub, And, Or, Xor,
+    Push, Pop,
+    Cmp,
+    SetE, SetNE, SetA, SetB, SetAE, SetBE, SetG, SetL, SetGE, SetLE,
+    JmpE, JmpNE, JmpA, JmpB, JmpAE, JmpBE, JmpG, JmpL, JmpGE, JmpLE, Jmp,
+    JmpNop, // A nop used for inverting Jmp
+    Mov,
+    MovRet
 }
 
 impl OperationType {
@@ -24,20 +31,42 @@ impl OperationType {
         }
     }
 
+    pub fn inverse(&self) -> Self {
+        match self {
+            OperationType::JmpE => OperationType::JmpNE,
+            OperationType::JmpNE => OperationType::JmpE,
+            OperationType::JmpA => OperationType::JmpBE,
+            OperationType::JmpB => OperationType::JmpAE,
+            OperationType::JmpAE => OperationType::JmpB,
+            OperationType::JmpBE => OperationType::JmpA,
+            OperationType::JmpG => OperationType::JmpLE,
+            OperationType::JmpL => OperationType::JmpGE,
+            OperationType::JmpGE => OperationType::JmpL,
+            OperationType::JmpLE => OperationType::JmpG,
+            OperationType::Jmp => OperationType::JmpNop,
+            OperationType::JmpNop => OperationType::Jmp,
+            _ => panic!("Not a jump instruction")
+        }
+    }
+
     // Returns a bitmap to all operands that are overridden by the operation
     // 00000001 means first, 00000010 means second, 00000101 means first and third etc
     pub fn destroyed(&self) -> u8 {
         match self {
             OperationType::Cmp | OperationType::Push |
-            OperationType::Pop | OperationType::SetE | OperationType::SetNe |
+            OperationType::Pop | OperationType::SetE | OperationType::SetNE |
             OperationType::SetA | OperationType::SetB | OperationType::SetAE |
             OperationType::SetBE | OperationType::SetG | OperationType::SetL |
-            OperationType::SetGE | OperationType::SetLE => 0,
+            OperationType::SetGE | OperationType::SetLE | OperationType::JmpLE |
+            OperationType::JmpE | OperationType::JmpNE | OperationType::JmpA |
+            OperationType::JmpB | OperationType::JmpAE | OperationType::JmpBE |
+            OperationType::JmpG | OperationType::JmpL | OperationType::JmpGE |
+            OperationType::JmpNop | OperationType::Jmp => 0,
 
             OperationType::Mov | OperationType::MovRet | OperationType::IMul |
             OperationType::Mul | OperationType::Add | OperationType::Sub |
             OperationType::IDiv | OperationType::Div | OperationType::Or |
-            OperationType::And | OperationType::Xor => 1
+            OperationType::And | OperationType::Xor => 1,
         }
     }
 
@@ -52,10 +81,17 @@ impl OperationType {
             OperationType::Mov | OperationType::And | OperationType::Or |
             OperationType::Xor | OperationType::Cmp  => MEM_GEN_REG,
 
-            OperationType::Push | OperationType::Pop | OperationType::SetE | OperationType::SetNe |
+            OperationType::Push | OperationType::Pop | OperationType::SetE | OperationType::SetNE |
             OperationType::SetA | OperationType::SetB | OperationType::SetAE |
             OperationType::SetBE | OperationType::SetG | OperationType::SetL |
-            OperationType::SetGE | OperationType::SetLE => GEN_REG
+            OperationType::SetGE | OperationType::SetLE => GEN_REG,
+
+            OperationType::JmpE | OperationType::JmpNE | OperationType::JmpA |
+            OperationType::JmpB | OperationType::JmpAE | OperationType::JmpBE |
+            OperationType::JmpG | OperationType::JmpL | OperationType::JmpGE |
+            OperationType::JmpLE | OperationType::JmpNop => IMM64,
+
+            OperationType::Jmp => GEN_REG | IMM64
         }
     }
 
@@ -67,10 +103,14 @@ impl OperationType {
             OperationType::And | OperationType::Or | OperationType::Xor =>
                 MEM_GEN_REG | IMM32 | IMM32 | IMM16 | IMM8,
             OperationType::Mov => MEM_GEN_REG | IMM64 | IMM32 | IMM32 | IMM16 | IMM8,
-            OperationType::Push | OperationType::Pop | OperationType::SetE | OperationType::SetNe |
+            OperationType::Push | OperationType::Pop | OperationType::SetE | OperationType::SetNE |
             OperationType::SetA | OperationType::SetB | OperationType::SetAE | OperationType::SetBE |
             OperationType::SetG | OperationType::SetL | OperationType::SetGE |
-            OperationType::SetLE | OperationType::MovRet => panic!("No second operand")
+            OperationType::SetLE | OperationType::MovRet |OperationType::JmpE |
+            OperationType::JmpNE | OperationType::JmpA | OperationType::JmpB |
+            OperationType::JmpAE | OperationType::JmpBE | OperationType::JmpG |
+            OperationType::JmpL | OperationType::JmpGE | OperationType::JmpLE |
+            OperationType::Jmp | OperationType::JmpNop => panic!("No second operand")
         }
     }
 

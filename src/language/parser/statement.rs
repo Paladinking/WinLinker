@@ -94,24 +94,24 @@ impl BlockStatementParser for IfBlockParser {
         let word = parser.read_word();
         println!("word: {:?}", word);
         return if let Ok("else") = word {
-
+            let condition = if let Ok("if") = parser.read_word() {
+                Some(parser.parse_expression()?)
+            } else {
+                None
+            };
             self.statements.push(
                 IfStatement {
-                    condition: None,
+                    condition,
                     block : vec![],
                 }
             );
-            if parser.peek_char() != Some('{') {
-                self.statements.last_mut().unwrap().condition.replace(
-                    parser.parse_expression()?);
-            }
             parser.assert_char('{')?;
             Ok(None)
         } else {
             parser.reset();
-            Ok((Some(StatementData::new(
+            Ok(Some(StatementData::new(
                 Statement::IfBlock(std::mem::take(&mut self.statements)),
-                self.pos))))
+                self.pos)))
         }
     }
 }

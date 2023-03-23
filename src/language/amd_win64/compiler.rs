@@ -12,12 +12,12 @@ use crate::language::types::Type;
 
 pub enum OperationUnit <'a> {
     Operation(Operation<'a>), // Real operation
-    EnterBlock(HashMap<usize, usize>),
+    EnterBlock(usize),
     LeaveBlock
 }
 
 impl <'a> OperationUnit <'a> {
-    fn operation(operator : OperationType, operands : Vec<&'a Operand>, dest : Option<&'a Operand>) -> OperationUnit {
+    fn operation(operator : OperationType, operands : Vec<&'a Operand>, dest : Option<&'a Operand>) -> OperationUnit<'a> {
         OperationUnit::Operation(Operation::new(
             operator, operands, dest
         ))
@@ -25,14 +25,16 @@ impl <'a> OperationUnit <'a> {
 }
 
 trait BlockCompiler<'a> {
-    fn begin<'b>(&'b mut self, builder: &mut InstructionBuilder) -> std::slice::Iter<'a, StatementData>;
+    fn begin<'b>(&'b mut self, builder: &mut InstructionBuilder<'a>, usages : &mut HashMap<usize, usize>) -> std::slice::Iter<'a, StatementData>;
 
-    fn end<'b>(&'b mut self, builder : &mut InstructionBuilder, usages : HashMap<usize, usize>) -> Option<std::slice::Iter<'a, StatementData>>;
+    fn end<'b>(&'b mut self, builder : &mut InstructionBuilder<'a>, usages : HashMap<usize, usize>, parent_usages : &mut HashMap<usize, usize>) -> Option<std::slice::Iter<'a, StatementData>>;
 }
 
 struct IfBlockBuilder<'a> {
     statements : &'a Vec<IfStatement>,
     block_ids : Vec<usize>,
+    label_queue : Vec<(&'a Operand, usize)>,
+    label_locations : Vec<Option<usize>>,
     usages : HashSet<usize>,
     index : usize
 }
@@ -42,18 +44,127 @@ impl <'a> IfBlockBuilder<'a> {
         IfBlockBuilder {
             statements,
             block_ids : statements.iter().map(|_| builder.tracker.get_id()).collect(),
+            label_queue : Vec::new(),
+            label_locations : vec![None; (statements.len() * 2) + 1], // All conditions start and end + after all blocks
             usages : HashSet::new(),
             index : 0
+        }
+    }
+
+    // Returns the location of the current blocks else clause in the label_locations vec.
+    fn else_location(&self) -> usize {
+       self.index * 2 + 2
+    }
+
+    // Returns the location of the current block (after condition) in the label_locations vec.
+    fn block_location(&self) -> usize {
+        self.index * 2 + 1
+    }
+
+    fn add_condition<'b>(&'b mut self, builder : &mut InstructionBuilder<'a>, usages : &mut HashMap<usize, usize>) {
+        if let Some(expr) = &self.statements[self.index].condition {
+            let mut location_offset = self.label_locations.len();
+            self.label_locations.resize(location_offset + expr.len(), None);
+            let mut stack = vec![(expr.len() - 1, None, Some(self.else_location()), self.block_location())];
+            while let Some((index, true_location, false_location, after)) = stack.pop() {
+                match &expr[index].expression {
+                    Expression::Operator { operator : DualOperator::BoolAnd, first, second} => {
+                        stack.push((*second, true_location, false_location, after));
+                        stack.push((*first, None, Some(false_location.unwrap_or(after)), location_offset + *second));
+
+                    },
+                    Expression::Operator {operator : DualOperator::BoolOr, first, second} => {
+                        stack.push((*second, true_location, false_location, after));
+                        stack.push((*first, Some(true_location.unwrap_or(after)), None, location_offset + *second));
+                    },
+                    Expression::SingleOperator {operator : SingleOperator::Not, expr} => {
+                        stack.push((*expr, false_location, true_location, after));
+                    },
+                    e => {
+                        self.label_locations[index + location_offset] = Some(builder.operations.len());
+                        let jmp = match e {
+                            Expression::Variable(v) => {
+                                let im = builder.arena.alloc(Operand::local(&mut builder.tracker, OperandSize::from(v.var_type)));
+                                builder.register_state.allocate_imm(im, 0, OperandSize::from(v.var_type));
+                                usages.insert(im.id, builder.operations.len());
+                                builder.operations.push(OperationUnit::operation(
+                                    OperationType::Cmp, vec![builder.operands[v.id.get().unwrap()], &*im], None
+                                ));
+                                OperationType::JmpE
+                            }
+                            Expression::Operator { operator, first, second} => {
+                                let mut locations = Vec::new();
+                                let mut pos = *first;
+                                loop {
+                                    match &expr[pos].expression {
+                                        Expression::Operator { first, .. } => pos = *first,
+                                        Expression::SingleOperator { expr, .. } => pos = *expr,
+                                        _ => break
+                                    }
+                                }
+                                builder.add_expressions(&expr[pos..index], usages, &mut locations, pos);
+                                usages.insert(locations[*first - pos].id, builder.operations.len());
+                                usages.insert(locations[*second - pos].id, builder.operations.len());
+                                let singed = || expr[*first].t.is_signed();
+                                builder.operations.push(OperationUnit::operation(
+                                    OperationType::Cmp, vec![locations[*first - pos], locations[*second - pos]], None
+                                ));
+                                match operator {
+                                    DualOperator::Equal => OperationType::JmpE,
+                                    DualOperator::NotEqual => OperationType::JmpNE,
+                                    DualOperator::GreaterEqual => if singed() {OperationType::JmpGE} else {OperationType::JmpAE},
+                                    DualOperator::LesserEqual => if singed() {OperationType::JmpLE} else {OperationType::JmpBE},
+                                    DualOperator::Greater => if singed() {OperationType::JmpG} else {OperationType::JmpA},
+                                    DualOperator::Lesser => if singed() {OperationType::JmpL} else {OperationType::JmpB},
+                                    _ => panic!("Not a boolean operator")
+                                }
+                            },
+                            Expression::BoolLiteral(b) => {
+                                if *b {
+                                    OperationType::Jmp
+                                } else {
+                                    OperationType::JmpNop
+                                }
+                            }
+                            _ => panic!("Non boolean condition")
+                        };
+                        let jmp_dest = builder.arena.alloc(Operand::local(&mut builder.tracker, OperandSize::QWORD));
+                        if let Some(location) = true_location {
+                            self.label_queue.push((jmp_dest, location));
+                            builder.operations.push(OperationUnit::operation(
+                                jmp, vec![jmp_dest], None
+                            ));
+                            if let Some(location) = false_location {
+                                let jmp_dest = builder.arena.alloc(Operand::local(&mut builder.tracker, OperandSize::QWORD));
+                                self.label_queue.push((jmp_dest, location));
+                                builder.operations.push(OperationUnit::operation(
+                                    jmp.inverse(), vec![jmp_dest], None
+                                ));
+                            }
+                        } else {
+                            let location = false_location.unwrap();
+                            self.label_queue.push((jmp_dest, location));
+                            builder.operations.push(OperationUnit::operation(
+                                jmp.inverse(), vec![jmp_dest], None
+                            ));
+                        }
+                    }
+                }
+            }
         }
     }
 }
 
 impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
-    fn begin<'b>(&'b mut self, _builder : &mut InstructionBuilder) -> std::slice::Iter<'a, StatementData> {
+    fn begin<'b>(&'b mut self, builder : &mut InstructionBuilder<'a>, usages : &mut HashMap<usize, usize>) -> std::slice::Iter<'a, StatementData> {
+        self.label_locations[0] = Some(builder.operations.len());
+        self.add_condition(builder, usages);
+        self.label_locations[1] = Some(builder.operations.len() + 1); // + 1 to skip EnterBlock
+        builder.operations.push(OperationUnit::EnterBlock(self.block_ids[0]));
         self.statements[0].block.iter()
     }
 
-    fn end<'b>(&'b mut self, builder : &mut InstructionBuilder, usages : HashMap<usize, usize>) -> Option<std::slice::Iter<'a, StatementData>> {
+    fn end<'b>(&'b mut self, builder : &mut InstructionBuilder<'a>, usages : HashMap<usize, usize>, parent_usages : &mut HashMap<usize, usize>) -> Option<std::slice::Iter<'a, StatementData>> {
         for (k, v) in usages {
             if !self.usages.contains(&k) {
                 self.usages.insert(k);
@@ -65,13 +176,37 @@ impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
                 builder.usages.get_mut(&k).unwrap()[self.index] = (self.block_ids[self.index], v);
             }
         }
+        builder.operations.push(OperationUnit::LeaveBlock);
         self.index += 1;
         if let Some(s) = self.statements.get(self.index) {
+            let jmp_dest = builder.arena.alloc(Operand::local(&mut builder.tracker, OperandSize::QWORD));
+            self.label_queue.push((jmp_dest, self.statements.len() * 2));
+            builder.operations.push(OperationUnit::operation(
+               OperationType::Jmp, vec![&*jmp_dest], None
+            ));
+
+            self.label_locations[self.index * 2].replace(builder.operations.len());
+            self.add_condition(builder, parent_usages);
+            self.label_locations[self.index * 2 + 1].replace(builder.operations.len() + 1); // + 1 to skip EnterBlock
+            builder.operations.push(OperationUnit::EnterBlock(self.block_ids[self.index]));
             Some(s.block.iter())
         } else {
+            self.label_locations[self.statements.len() * 2].replace(builder.operations.len());
+            for &(o, index) in &self.label_queue {
+                let addr = self.label_locations[index].unwrap();
+                builder.register_state.allocate_addr(o, addr);
+            }
             None
         }
     }
+}
+
+// Struct used for changing an address to the real one.
+// Important that the address is the last part of instruction.
+pub struct AddressRelocation {
+    pub index : usize, // Location of address in output bytes
+    pub target : usize, // Location of target in the address list
+    pub size : OperandSize // Size of the address
 }
 
 pub struct InstructionBuilder <'a> {
@@ -101,11 +236,6 @@ impl <'a> InstructionBuilder <'a> {
         }
     }
 
-    fn add_condition(&mut self, expr : &Vec<ExpressionData>, usages : &mut HashMap<usize, usize>) {
-        todo!();
-        
-    }
-
     fn add_dual_operator(&mut self, locations : &mut Vec<&'a Operand>, first : usize, second : usize, size : OperandSize, t : Type, op : DualOperator) {
         if op.is_cmp() {
             self.operations.push(OperationUnit::operation(OperationType::Cmp,
@@ -113,7 +243,7 @@ impl <'a> InstructionBuilder <'a> {
                                                 None));
             let basic_operator = match op {
                 DualOperator::Equal => OperationType::SetE,
-                DualOperator::NotEqual => OperationType::SetNe,
+                DualOperator::NotEqual => OperationType::SetNE,
                 DualOperator::GreaterEqual => if t.is_signed() { OperationType::SetGE } else { OperationType::SetAE},
                 DualOperator::LesserEqual => if t.is_signed() { OperationType::SetLE} else { OperationType::SetBE},
                 DualOperator::Greater => if t.is_signed() { OperationType::SetG } else { OperationType::SetA},
@@ -174,9 +304,7 @@ impl <'a> InstructionBuilder <'a> {
         }
     }
 
-    fn add_assigment(&mut self, dest : &Variable, expr : &Vec<ExpressionData>, usages : &mut HashMap<usize, usize>) {
-        let mut locations = Vec::with_capacity(expr.len());
-        let prev_len = self.operations.len();
+    fn add_expressions(&mut self, expr : &[ExpressionData], usages : &mut HashMap<usize, usize>, locations : &mut Vec<&'a Operand>, offset : usize) {
         for e in expr.iter() {
             match &e.expression {
                 Expression::Variable(v) => {
@@ -184,14 +312,14 @@ impl <'a> InstructionBuilder <'a> {
                     locations.push(self.operands[id].clone());
                 },
                 &Expression::Operator { first, operator, second } => {
-                    usages.insert(locations[first].id, self.operations.len());
-                    usages.insert(locations[second].id, self.operations.len());
+                    usages.insert(locations[first - offset].id, self.operations.len());
+                    usages.insert(locations[second - offset].id, self.operations.len());
                     let size = OperandSize::from(e.t);
-                    self.add_dual_operator(&mut locations, first, second, size, expr[first].t, operator);
+                    self.add_dual_operator(locations, first - offset, second - offset, size, expr[first].t, operator);
                 }
                 &Expression::SingleOperator { operator, expr } => {
-                    usages.insert(locations[expr].id, self.operations.len());
-                    self.add_single_operator(&mut locations, expr, operator);
+                    usages.insert(locations[expr - offset].id, self.operations.len());
+                    self.add_single_operator(locations, expr - offset, operator);
                 }
                 &Expression::IntLiteral(val) => {
                     let new = self.arena.alloc(Operand::new(&mut self.tracker, OperandSize::from(e.t)));
@@ -208,6 +336,12 @@ impl <'a> InstructionBuilder <'a> {
                 Expression::None => unreachable!("Should not exist ever.")
             };
         }
+    }
+
+    fn add_assigment(&mut self, dest : &Variable, expr : &Vec<ExpressionData>, usages : &mut HashMap<usize, usize>) {
+        let mut locations = Vec::with_capacity(expr.len());
+        let prev_len = self.operations.len();
+        self.add_expressions(&expr, usages, &mut locations, 0);
         let index = dest.id.get().unwrap();
         let new_dest = self.arena.alloc(
             Operand::local(&mut self.tracker, OperandSize::from(dest.var_type)));
@@ -229,10 +363,11 @@ impl <'a> InstructionBuilder <'a> {
         }
     }
 
-    pub fn with(mut self, statements : &Vec<StatementData>) -> Self {
+    pub fn with(mut self, statements : &'a Vec<StatementData>) -> Self {
         let mut statement_stack = vec![(statements.iter(), HashMap::new())];
         let mut builder_stack = Vec::new();
         let outer_scope_id = self.tracker.get_id();
+        self.operations.push(OperationUnit::EnterBlock(outer_scope_id));
         while let Some((iter, usage_map)) = statement_stack.last_mut() {
             if let Some(val) = iter.next() {
                 match &val.statement {
@@ -243,7 +378,8 @@ impl <'a> InstructionBuilder <'a> {
                         let mut builder : Box<dyn BlockCompiler> = Box::new(
                             IfBlockBuilder::new(&mut self, if_statement)
                         );
-                        statement_stack.push((builder.begin(&mut self), HashMap::new()));
+                        let iter = builder.begin(&mut self, usage_map);
+                        statement_stack.push((iter, HashMap::new()));
                         builder_stack.push(builder);
                     }
                     Statement::Block(_) => todo!()
@@ -251,7 +387,8 @@ impl <'a> InstructionBuilder <'a> {
             } else {
                 let (_, usages) = statement_stack.pop().unwrap();
                 if let Some(builder) = builder_stack.last_mut() {
-                    if let Some(iter) = builder.end(&mut self, usages) {
+                    let parent_usages = &mut statement_stack.last_mut().unwrap().1;
+                    if let Some(iter) = builder.end(&mut self, usages, parent_usages) {
                         statement_stack.push((iter, HashMap::new()));
                     } else {
                         builder_stack.pop();
@@ -264,7 +401,7 @@ impl <'a> InstructionBuilder <'a> {
                 }
             }
         }
-        println!("stack: {:?}", self.usages);
+
         let exit = self.operands[self.exit_code];
         let out = self.arena.alloc(Operand::local(&mut self.tracker,
                                                   exit.size));
@@ -272,6 +409,7 @@ impl <'a> InstructionBuilder <'a> {
         // An empty vector here will indicate used in some unknown scope, this is fine.
         self.usages.insert(out.id, vec![]);
         self.operations.push(OperationUnit::operation(OperationType::MovRet, vec![exit], Some(out)));
+        self.operations.push(OperationUnit::LeaveBlock);
         self
     }
 
@@ -282,7 +420,7 @@ impl <'a> InstructionBuilder <'a> {
             let operation = if let OperationUnit::Operation(operation) = operation {
                 operation
             } else {
-                panic!("Not yet implemented");
+                continue;
             };
             for (i, &operand) in operation.operands.iter().enumerate() {
                 let hint = operation.operator.bitmap_hint(i, operand.size);
@@ -313,11 +451,24 @@ impl <'a> InstructionBuilder <'a> {
         let mut invalidation = 0;
         let mut used_stable = 0_u64;
 
+        let mut scope = 0;
+        let mut block_stack = vec![0];
+        let mut operation_index_list = Vec::with_capacity(self.operations.len());
+
         for (index, operation) in self.operations.iter_mut().enumerate() {
-            let operation = if let OperationUnit::Operation(operation) = operation {
-                operation
-            } else {
-                panic!("Not yet implemented");
+            operation_index_list.push(self.register_state.output.len());
+            let operation = match operation {
+                OperationUnit::Operation(o) => o,
+                OperationUnit::EnterBlock(block) => {
+                    block_stack.push(scope);
+                    scope = *block;
+                    println!("New block : {}", scope);
+                    continue;
+                },
+                OperationUnit::LeaveBlock => {
+                    scope = block_stack.pop().unwrap();
+                    continue;
+                }
             };
             // Get bitmap of all registers invalidated by this instruction
             let mut invalid_now = 0;
@@ -340,9 +491,8 @@ impl <'a> InstructionBuilder <'a> {
 
             let mut bitmap = 1;
             let destroyed = operation.operator.destroyed();
-            println!("{:?} : index {}", operation.operator, index);
+            println!("\n{:?} : index {}", operation.operator, index);
             for (i, operand) in operation.operands.iter_mut().enumerate() {
-                println!("i: {}", operand.id);
                 bitmap = operation.operator.next_bitmap(
                     bitmap, i, operand.size
                 );
@@ -351,7 +501,7 @@ impl <'a> InstructionBuilder <'a> {
                     self.register_state.allocate(*operand, bitmap & MEM_GEN_REG, invalid_now, invalid_soon);
                 }
                 let mut allocation_bitmap = self.register_state.allocation_bitmap(operand);
-                if (used_after(0, index, &self.usages, operand) && destroyed & (1 << i) != 0) || allocation_bitmap & bitmap == 0 {
+                if (used_after(scope, index, &self.usages, operand) && destroyed & (1 << i) != 0) || allocation_bitmap & bitmap == 0 {
                     let new = self.arena.alloc(
                         Operand::local(&mut self.tracker,operand.size));
                     let location = self.register_state.allocate(new, bitmap & MEM_GEN_REG, invalid_now, invalid_soon);
@@ -363,7 +513,7 @@ impl <'a> InstructionBuilder <'a> {
                     }
                     allocation_bitmap = location;
 
-                    if !used_after(0, index, &self.usages, operand) {
+                    if !used_after(scope, index, &self.usages, operand) {
                         self.register_state.free(operand);
                     }
                     *operand = new;
@@ -376,7 +526,7 @@ impl <'a> InstructionBuilder <'a> {
                 // If this operand is going to be freed there is no need to invalidate it.
                 // It cannot be freed until after invalidation is done since otherwise
                 //  they might be overridden while saving needed invalidated registers.
-                if !used_after(0, index, &self.usages, operand){
+                if !used_after(scope, index, &self.usages, operand){
                     invalid_now &= !allocation_bitmap;
                 }
                 bitmap = allocation_bitmap;
@@ -408,7 +558,7 @@ impl <'a> InstructionBuilder <'a> {
                 }
             }
             for &operand in &operation.operands {
-                if !used_after(0, index, &self.usages, operand) {
+                if !used_after(scope, index, &self.usages, operand) {
                     self.register_state.free(operand);
                 }
             }
@@ -416,9 +566,48 @@ impl <'a> InstructionBuilder <'a> {
 
         let compiler = InstructionCompiler::new();
         let mut res = Vec::new();
+        let mut address_list = Vec::with_capacity(self.register_state.output.len());
+        let mut label_queue = Vec::new();
         for instruction in &self.register_state.output {
-            compiler.compile_instruction(instruction, &mut res);
+            address_list.push(res.len());
+            compiler.compile_instruction(instruction, &mut res, &mut label_queue);
         }
+        for relocation in label_queue {
+            let target = address_list[operation_index_list[relocation.target]] as isize;
+
+            // Relative address is relative to PC after instruction
+            let diff = target - ((relocation.index + relocation.size as usize) as isize);
+            let index = relocation.index;
+            match relocation.size {
+                OperandSize::BYTE => {
+                    let jmp = i8::try_from(diff).unwrap();
+                    let bytes : &[u8; 1] = &jmp.to_le_bytes();
+                    res[index] = bytes[0];
+                },
+                OperandSize::WORD => {
+                    let jmp = i16::try_from(diff).unwrap();
+                    let bytes : &[u8; 2] = &jmp.to_le_bytes();
+                    for (i, &b) in bytes.iter().enumerate() {
+                        res[index + i] = b;
+                    }
+                }
+                OperandSize::DWORD => {
+                    let jmp = i32::try_from(diff).unwrap();
+                    let bytes : &[u8; 4] = &jmp.to_le_bytes();
+                    for (i, &b) in bytes.iter().enumerate() {
+                        res[index + i] = b;
+                    }
+                }
+                OperandSize::QWORD => {
+                    let jmp = i64::try_from(diff).unwrap();
+                    let bytes : &[u8; 8] = &jmp.to_le_bytes();
+                    for (i, &b) in bytes.iter().enumerate() {
+                        res[index + i] = b;
+                    }
+                }
+            }
+        }
+
         std::fs::write("out.bin", &res).unwrap();
 
         println!();

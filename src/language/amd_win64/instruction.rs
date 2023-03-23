@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 use derivative::Derivative;
+use crate::language::amd_win64::compiler::AddressRelocation;
 use crate::language::amd_win64::operation::{OperationType, OperandSize};
 
 #[derive(Clone, Copy)]
@@ -16,6 +17,7 @@ enum Mnemonic {
     Mem, // Memory in ModRm.r/m (+ potentially SIB)
     RmReg, //  Register in ModRm.r/m
     RegImm(OperandSize), //Immediate value
+    RelAddr, // Relative address for jump
     Pass, // Ignore operand
 }
 
@@ -30,10 +32,10 @@ impl Mnemonic {
 
 // Used to generate empty Instructions as keys for the instruction map
 enum OperandType {
-    Reg = 0, Mem = 1, Imm = 2
+    Reg = 0, Mem = 1, Imm = 2, Addr = 3
 }
 
-#[derive(Derivative, Eq)]
+#[derive(Derivative, Eq, Debug)]
 #[derivative(PartialEq, Hash)]
 pub enum InstructionOperand {
     Reg(
@@ -56,7 +58,7 @@ pub enum InstructionOperand {
 
 // An instruction contains everything about an instruction needed to compile it into machine code
 //  (except exact memory offsets). They can hash based on
-#[derive(PartialEq, Hash, Eq)]
+#[derive(PartialEq, Hash, Eq, Debug)]
 pub struct Instruction {
     operation : OperationType,
     size : OperandSize,
@@ -75,7 +77,8 @@ impl Instruction {
             operation, size, operands : operands.iter().map(|ot| match ot {
                 OperandType::Reg => InstructionOperand::Reg(0),
                 OperandType::Mem => InstructionOperand::Mem(0),
-                OperandType::Imm => InstructionOperand::Imm(0)
+                OperandType::Imm => InstructionOperand::Imm(0),
+                OperandType::Addr => InstructionOperand::Addr(0)
             }).collect()
         }
     }
@@ -124,13 +127,13 @@ impl InstructionCompiler {
         }
     }
 
-    pub fn compile_instruction(&self, instruction : &Instruction, res : &mut Vec<u8>) {
+    pub fn compile_instruction(&self, instruction : &Instruction, res : &mut Vec<u8>, label_queue : &mut Vec<AddressRelocation>) {
         let start = res.len();
         let mut rex : Option<u8> = None;
         let mut opcode_index = None;
         let mut mod_rm_index = None;
         let mut index = 0;
-
+        println!("{:?}", instruction);
         for op in self.map.get(instruction).unwrap() {
             match op {
                 Mnemonic::Prefix(val) | Mnemonic::Value(val) => res.push(*val),
@@ -190,6 +193,15 @@ impl InstructionCompiler {
                 Mnemonic::RegImm(size) => {
                     let imm : &[u8; 8] = &instruction.get_imm(&mut index).to_le_bytes();
                     res.extend_from_slice(&imm[0..(*size as usize)]);
+                },
+                Mnemonic::RelAddr => {
+                    let addr = instruction.get_addr(&mut index);
+                    label_queue.push(AddressRelocation {
+                        index : res.len(),
+                        target: addr,
+                        size: OperandSize::DWORD,
+                    });
+                    res.resize(res.len() + 4, 0);
                 },
                 Mnemonic::Pass => {
                     index += 1;
@@ -305,7 +317,7 @@ fn create_instruction_map() -> HashMap<Instruction, Vec<Mnemonic>> {
     );
     standard_instr(&mut map, OperationType::Cmp, 0x38, 0x3A, 0x80, 0x39, 0x3B, 0x81, 7);
     for (opcode, op) in vec![
-        (0x94, OperationType::SetE), (0x95, OperationType::SetNe), (0x97, OperationType::SetA),
+        (0x94, OperationType::SetE), (0x95, OperationType::SetNE), (0x97, OperationType::SetA),
         (0x92, OperationType::SetB), (0x93, OperationType::SetAE), (0x96, OperationType::SetBE),
         (0x9F, OperationType::SetG), (0x9C, OperationType::SetL), (0x9D, OperationType::SetGE),
         (0x9E, OperationType::SetLE),
@@ -314,11 +326,29 @@ fn create_instruction_map() -> HashMap<Instruction, Vec<Mnemonic>> {
             Instruction::mnemonic(op, OperandSize::BYTE, &[OperandType::Reg]),
             vec![Opcode2(opcode), ModRm(0), RmReg]
         );
+    }
+
+    for (opcode, op) in vec![
+        (0x84, OperationType::JmpE), (0x85, OperationType::JmpNE), (0x87, OperationType::JmpA),
+        (0x82, OperationType::JmpB), (0x83, OperationType::JmpAE), (0x86, OperationType::JmpBE),
+        (0x8F, OperationType::JmpG), (0x8C, OperationType::JmpL), (0x8D, OperationType::JmpGE),
+        (0x8E, OperationType::JmpLE),
+    ] {
         map.insert(
-            Instruction::mnemonic(op, OperandSize::BYTE, &[OperandType::Mem]),
-            vec![Opcode2(opcode), ModRm(0), RmReg]
+            // The relative address is actually 32 bits (DWORD), but since no 64 bit relative
+            // jumps are possible, they are treated as if 64 bit because I have not fixed it yet.
+            Instruction::mnemonic(op, OperandSize::QWORD, &[OperandType::Addr]),
+            vec![Opcode2(opcode), RelAddr]
         );
     }
+    map.insert(
+        Instruction::mnemonic(OperationType::Jmp, OperandSize::QWORD, &[OperandType::Addr]),
+        vec![Opcode(0xE9), RelAddr]
+    );
+    map.insert(
+        Instruction::mnemonic(OperationType::Jmp, OperandSize::QWORD, &[OperandType::Reg]),
+        vec![Opcode(0xE9), ModRm(4 << 3), RmReg]
+    );
 
     standard_instr(&mut map, OperationType::And, 0x20, 0x22, 0x80, 0x21, 0x23, 0x81, 4);
     standard_instr(&mut map, OperationType::Or, 0x08, 0x0A, 0x80, 0x09, 0x0B, 0x81, 1);
