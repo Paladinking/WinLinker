@@ -178,18 +178,6 @@ impl Operand {
         }
     }
 
-    pub fn local(tracker : &mut IdTracker, size : OperandSize) -> Operand {
-        Self::new(tracker, size)
-    }
-
-    /*pub fn add_use(&self, index : usize) {
-        self.last_use.replace(index);
-    }*/
-
-    /*pub(crate) fn used_after(&self, index: usize) -> bool {
-        false//index < self.last_use.get()
-    }*/
-
     pub(crate) fn merge_into(&self, other: &Operand) {
         other.allocation.replace(self.allocation.get());
     }

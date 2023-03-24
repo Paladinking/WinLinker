@@ -42,3 +42,30 @@ start {
     }
     exit_code = a;
 } end
+
+GOAL = NONE means fallthrough
+
+
+Short-circuiting pseudocode
+Rules:
+	1. Push root with TRUE_GOAL = NONE, FALSE_GOAL = ELSE
+	2. Pop expression from stack
+	3. Check expression
+	3a. && =>
+		FALSE_GOAL_2 = FALSE_GOAL.map_none(AFTER)
+		Push child 2 with TRUE_GOAL = TRUE_GOAL, FALSE_GOAL = FALSE_GOAL
+		Push child 1 with TRUE_GOAL = NONE, FALSE_GOAL = FALSE_GOAL_2
+
+	3b. || =>
+		TRUE_GOAL_2 = TRUE_GOAL.map_none(AFTER)
+		Push child 2 with TRUE_GOAL = TRUE_GOAL, FALSE_GOAL = FALSE_GOAL
+		Push child 1 with TRUE_GOAL = TRUE_GOAL_2, FALSE_GOAL = NONE
+	3c. ! =>
+	    Push child 1 with TRUE_GOAL = FALSE_GOAL, FALSE_GOAL = TRUE_GOAL
+	3d. expr =>
+		add Eval(expr)
+		if Some(TRUE_GOAL):
+			add JMP expr TRUE_GOAL
+			If Some(FALSE_GOAL) add JMP FALSE_GOAL
+		else:
+			add JMP NOT expr FALSE_GOAL
