@@ -5,6 +5,7 @@ start {
     a = 10;
     b = 20;
     c = a * b > 15 * 15;
+    b = 30;
     if a >= b && c {
         a = 12 ;
     } else {

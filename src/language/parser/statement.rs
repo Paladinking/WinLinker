@@ -109,9 +109,9 @@ impl BlockStatementParser for IfBlockParser {
             Ok(None)
         } else {
             parser.reset();
-            Ok((Some(StatementData::new(
+            Ok(Some(StatementData::new(
                 Statement::IfBlock(std::mem::take(&mut self.statements)),
-                self.pos))))
+                self.pos)))
         }
     }
 }

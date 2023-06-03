@@ -278,7 +278,7 @@ impl <'a>Parser<'a> {
                     if word == "true" {
                         expr = Expression::BoolLiteral(true);
                     } else if word == "false" {
-                        expr =Expression::BoolLiteral(false);
+                        expr = Expression::BoolLiteral(false);
                     } else if let Some(var) = self.variables.get(word) {
                         expr = Expression::Variable(var.clone());
                     } else {

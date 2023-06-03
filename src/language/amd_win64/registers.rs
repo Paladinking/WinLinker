@@ -269,7 +269,7 @@ impl RegisterState {
             MemoryAllocation::Memory(index, _) => {
                 self.memory[index] = false;
             },
-            MemoryAllocation::Immediate(..) => {},
+            MemoryAllocation::Immediate(..) | MemoryAllocation::Address(..) => {},
             MemoryAllocation::Hint(_) | MemoryAllocation::None => panic!("Double free")
         }
         self.allocations[operand.allocation.get()] = MemoryAllocation::None;

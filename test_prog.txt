@@ -1,126 +1,85 @@
 u32 a;
 u32 b;
 u32 c;
+u32 x1;
+u32 x2;
+u32 x3;
+u32 x4;
+u32 x5;
+u32 x6;
+u32 x7;
+u32 x8;
+u32 x9;
+u32 x10;
+u32 x11;
+u32 x12;
+u32 x13;
+u32 x14;
+u32 x15;
+u32 x16;
+u32 x17;
+u32 x18;
+u32 x19;
+u32 x20;
 bool d;
 
-start
+start {
+x1 = 1;
+x2 = 2;
+x3 = 3;
+x4 = 4;
+x5 = 5;
+x6 = 6;
+x7 = 7;
+x8 = 8;
+x9 = 9;
+x10 = 10;
+x11 = 11;
+x12 = 12;
+x13 = 13;
+x14 = 14;
+x15 = 15;
+x16 = 16;
+x17 = 17;
+x18 = 18;
+x19 = 19;
+x20 = 20;
 a = 5;
 c = 9;
-b = 100000000000000000;
+b = 5;
 d = 100 > a && true != false || !(20 * 30 >= 15);
 a = 10 * b / 11;
-c = a * a * a * a + a + c;
+c = a + c + x1 + x2 + x3 + x4 + x5 + x6 + x7 + x8 +
+ x9 + x10 + x11 + x12 + x13 + x14 + x15 + x16 + x17 + x18 + x19 + x20;
 exit_code = c + 100;
-end
+} end
 
 
-b = ((((b * 4) - 3) - 4) - 5) + a
-a = a + b
-a = a * 4
-
-Fel just nu:
-d:s register blir inte avalokerat
-c blir inte allokerat alls
-destinationen kanske är allokerad redan!
+Usages:
+    Map block-id + operand-id to vec of ranges
+    Inner scopes that contains usages in outer scopes have usage covering to the end of the inner scope
+    An operand can be freed if not used later by current scope.
 
 
-_a = 4             _a[0:12, true]
-_b = 2             _b[1:11, true]
-_c = 2             _c[2:4, true]
-_d = 4             _d[3:4, true]
-_e = _c * _d       _e[4:6, false]
-_f = 3             _f[5:6, true]
-_g = _e - _f       _g[6:8, false]
-_h = 4             _h[7:8, true]
-_i = _g - _h       _i[8:10, false]
-_j = 5             _j[9:10, true]
-_k = _i - _j       _k[10:11, false]
-_l = _b + _k       _l[11:12, false]
-c = _a * _l        c[12:12, false]
+on each variable, associate scope
+    variables in a scope outside what is being parsed should NOT be moved.
+    if the register is needed, the variable should be moved back.
+    Maybe free the register before the scope? (Using hints?)
+    Important that exiting the scope, everything looks the same as before the scope to the allocator
+        This allows parsing the next branch of an if-statement without reverting stuff.
+        Also required for loops to work well.
+        How???
+        What if variable is declared out of scope but initialized in scope?
+            Allocate register on decleration?
+            Allocate register before scope?
+                How?
+            Insert a Mov_ operations at the end of each scope to make sure they get to the right place!
+                What place is right?
+                Something clever
+                Decide before (using hints + invalidations), but don't allocate.
+                    No, loops will not work then.
+                Allocate just before scope AND add Mov_ operations
+                Scope needs to keep track of all used variables from higher scope.
 
 
 
-
-
-
-c = c * _l             c = rax, _a = c, _l = reg/mem
-c = 4
-_l = _l + 2        (symmetric),_l = rcx, _b = im(2), _k = _l
-_l = _l - 5         _i = _l, _j = im(5)
--
-_l = _l - 4         _g = _l, _h = im(4)
--
-_l = _l - 3         _e:= _l, _f = im(3)
-_l = _e
--
-_e = _e * _d        _e = rax, _d = rcx
-_e = 2
-_d = 4
-
-rcx = 4
-rax = 2
-rax = rax * rcx
-rcx = rax
-rcx = rcx - 3
-rcx  = rcx - 4
-rcx = rcx - 5
-rcx = rcx + 2
-rax = 4
-rax = rax * rcx
-
-mov rcx, 4
-mov rax, 2
-mul rcx
-mov rcx, rax
-sub rcx, 3
-sub rcx, 4
-sub rcx, 5
-add rcx, 2
-mov rax, 4
-mul rcx
-
-
-algorithm:
-    turn tree into list of pseudo_instructions collect variables, assignment, first use, last use, is imm
-    move all pseudo_instructions to just before first use
-    go from back of list:
-        if dual:
-            if (var_2.is_imm or var_1.is_imm and symmetric) and has fitting mnemonic:
-                choose that mnemonic
-            if required(op0 == op1):
-                if type_overlap(var_0, var_1):
-                    var_1 := var_0
-                else:
-                    prepend instruction var_1 = var_0
-                var_0 = choose reg / mem
-            else if allowed(op0 == op1) and type_overlap(var_0, var_1):
-                var_1 := var_0
-                var_0 = choose reg / mem
-            else:
-                var_0 = choose reg / mem
-                var_1 = choose reg / mem
-
-
-struct MiniVar {
-    imm : bool,
-    creation : usize,
-    first_use : usize,
-    last_use : usize
-}
-
-enum MiniOperation {
-    Imm(u64),
-    Add {op1 : usize, op2 : usize},
-    Sub {op1 : usize, op2 : usize},
-    MulSigned {op1 : usize, op2 : usize},
-    DivSigned {op1 : usize, op2 : usize},
-    MulUnsigned {op1 : usize, op2 : usize},
-    DivUnsigned {op1: usize, op2 : usize},
-    Not {op1 : usize},
-}
-
-struct MiniStatement {
-    var : usize,
-    operation : MiniOperation,
-    dest : usize,
-}

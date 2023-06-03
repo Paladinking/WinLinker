@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::collections::{HashMap, HashSet};
 use crate::language::types::Type;
 use super::registers::*;
 
@@ -126,29 +127,18 @@ impl IdTracker {
 pub struct Operand {
     pub allocation: Cell<usize>, // Index of allocated MemoryLocation
     pub size : OperandSize,
-    pub id : usize,
-    //last_use : Cell<usize> // Index of the last usage of this operand in instructions vector
+    // Contains all (scope, line) pairs this operand can be freed after
+    pub free_usages : HashSet<usize>,
+    pub final_usage : HashSet<usize>
 }
 
 
 impl Operand {
-    pub fn new(tracker : &mut IdTracker, size : OperandSize) -> Operand {
+    pub fn new(size : OperandSize) -> Operand {
         Operand {
-            allocation: Cell::new(0), size, id : tracker.get_id()
+            allocation: Cell::new(0), size, free_usages : HashSet::new(), final_usage : HashSet::new()
         }
     }
-
-    pub fn local(tracker : &mut IdTracker, size : OperandSize) -> Operand {
-        Self::new(tracker, size)
-    }
-
-    /*pub fn add_use(&self, index : usize) {
-        self.last_use.replace(index);
-    }*/
-
-    /*pub(crate) fn used_after(&self, index: usize) -> bool {
-        false//index < self.last_use.get()
-    }*/
 
     pub(crate) fn merge_into(&self, other: &Operand) {
         other.allocation.replace(self.allocation.get());
@@ -156,15 +146,15 @@ impl Operand {
 }
 
 #[derive(Debug, Clone)]
-pub struct Operation<'a> {
+pub struct Operation {
     pub operator : OperationType,
-    pub operands : Vec<&'a Operand>,
-    pub dest : Option<&'a Operand> // Many instructions have same dest as first operand, but they need to be kept separate in case the next usage of dest is incompatible.
+    pub operands : Vec<usize>, // Contains indices into main operands vector
+    pub dest : Option<usize> // Many instructions have same dest as first operand, but they need to be kept separate in case the next usage of dest is incompatible.
 }
 
 
-impl <'a> Operation<'a> {
-    pub fn new(operator : OperationType, operands : Vec<&'a Operand>, dest : Option<&'a Operand>) -> Operation<'a> {
+impl Operation {
+    pub fn new(operator : OperationType, operands : Vec<usize>, dest : Option<usize>) -> Operation {
         Operation {
             operator, operands, dest
         }
