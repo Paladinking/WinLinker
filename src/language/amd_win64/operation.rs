@@ -165,15 +165,14 @@ impl IdTracker {
 #[derive(Debug)]
 pub struct Operand {
     pub allocation: Cell<usize>, // Index of allocated MemoryLocation
-    pub size : OperandSize,
-    pub id : usize,
+    pub size : OperandSize
 }
 
 
 impl Operand {
-    pub fn new(tracker : &mut IdTracker, size : OperandSize) -> Operand {
+    pub fn new(size : OperandSize) -> Operand {
         Operand {
-            allocation: Cell::new(0), size, id : tracker.get_id()
+            allocation: Cell::new(0), size
         }
     }
 
@@ -183,15 +182,15 @@ impl Operand {
 }
 
 #[derive(Debug, Clone)]
-pub struct Operation<'a> {
+pub struct Operation {
     pub operator : OperationType,
-    pub operands : Vec<&'a Operand>,
-    pub dest : Option<&'a Operand> // Many instructions have same dest as first operand, but they need to be kept separate in case the next usage of dest is incompatible.
+    pub operands : Vec<usize>,
+    pub dest : Option<usize> // Many instructions have same dest as first operand, but they need to be kept separate in case the next usage of dest is incompatible.
 }
 
 
-impl <'a> Operation<'a> {
-    pub fn new(operator : OperationType, operands : Vec<&'a Operand>, dest : Option<&'a Operand>) -> Operation<'a> {
+impl Operation {
+    pub fn new(operator : OperationType, operands : Vec<usize>, dest : Option<usize>) -> Operation {
         Operation {
             operator, operands, dest
         }

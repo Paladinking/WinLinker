@@ -66,7 +66,6 @@ pub struct RegisterState {
     free_gen : u64, // Bitmap of all free general purpose registers
     home_gen : u64, // Bitmap of all registers that are a home location
     home_locations : HashMap<usize, MemoryAllocation>,
-    block_stack : Vec<Vec<(bool)>>, //
     pub output : Vec<Instruction>
 }
 
@@ -283,7 +282,7 @@ impl RegisterState {
         self.allocations[operand.allocation.get()] = MemoryAllocation::None;
     }
 
-    pub fn set_home(&mut self, operand : &Operand) {
+    /*pub fn set_home(&mut self, operand : &Operand) {
         let allocation = self.allocation_bitmap(operand);
         self.home_gen &= !allocation;
         self.home_locations.insert(operand.id, self.allocations[operand.allocation.get()]);
@@ -291,11 +290,13 @@ impl RegisterState {
 
     pub fn push_state(&mut self, operands : &Vec<&Operand>) {
         for operand in operands {
-            self.register_state.restore_allocation(operand);
+            self.restore_allocation(operand);
         }
     }
 
-    pub fn pop_state(&mut self,)
+    pub fn pop_state(&mut self) {
+
+    }
 
     pub fn restore_allocation(&mut self, operand: &Operand) {
         if self.is_free(operand) {
@@ -324,7 +325,7 @@ impl RegisterState {
             }
         }
 
-    }
+    }*/
 
     // Move all allocations that are contained in map to some register not in map.
     pub fn invalidate_registers(&mut self, map : u64) {
