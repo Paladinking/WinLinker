@@ -167,7 +167,6 @@ pub struct Operand {
     pub allocation: Cell<usize>, // Index of allocated MemoryLocation
     pub size : OperandSize,
     pub id : usize,
-    //last_use : Cell<usize> // Index of the last usage of this operand in instructions vector
 }
 
 

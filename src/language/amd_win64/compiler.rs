@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::rc::Rc;
 use bumpalo::Bump;
@@ -438,7 +438,7 @@ impl <'a> InstructionBuilder <'a> {
 
     // Allocate hints for what registers should be used
     // Allows e.g using rax if later instruction uses mul
-    fn allocate_hints(&mut self) {
+    fn allocate_hints(&mut self, home_locations : &mut Vec<u64>) {
         for operation in self.operations.iter() {
             let operation = if let OperationUnit::Operation(operation) = operation {
                 operation
@@ -456,11 +456,12 @@ impl <'a> InstructionBuilder <'a> {
         }
         // self.operands contains all variable operands, these are pre-allocated and then freed.
         // This means they can be restored to their home positions later.
+        *home_locations = self.operands.iter().map(|operand|
+            self.register_state.allocate(operand, MEM_GEN_REG, 0, 0)
+        ).collect();
         for operand in &self.operands {
-            self.register_state.allocate(operand, MEM_GEN_REG, 0, 0);
-        }
-        for operand in &self.operands {
-            self.register_state.free(operand, true);
+            self.register_state.set_home(operand);
+            self.register_state.free(operand);
         }
         for operation in self.operations.iter() {
             let operation = if let OperationUnit::Operation(operation) = operation {
@@ -476,27 +477,26 @@ impl <'a> InstructionBuilder <'a> {
     }
 
     pub fn compile(mut self) {
-        self.allocate_hints();
+
+        let mut home_locations = Vec::new();
+        self.allocate_hints(&mut home_locations);
 
         let mut invalidation = 0;
         let mut used_stable = 0_u64;
 
-        let mut scope = 0;
-        let mut block_stack = vec![0];
         let mut operation_index_list = Vec::with_capacity(self.operations.len());
 
         for (index, operation) in self.operations.iter_mut().enumerate() {
             operation_index_list.push(self.register_state.output.len());
             let operation = match operation {
                 OperationUnit::Operation(o) => o,
-                OperationUnit::EnterBlock(block) => {
-                    block_stack.push(scope);
-                    scope = *block;
-                    println!("New block : {}", scope);
+                OperationUnit::EnterBlock(_) => {
+
+                    self.register_state.push_state(&self.operands);
                     continue;
                 },
                 OperationUnit::LeaveBlock => {
-                    scope = block_stack.pop().unwrap();
+                    self.register_state.pop_state();
                     continue;
                 }
             };
@@ -551,7 +551,7 @@ impl <'a> InstructionBuilder <'a> {
 
                     usages.pop_front();
                     if first_use != Usage::Use {
-                        self.register_state.free(operand, first_use == Usage::TempFree);
+                        self.register_state.free(operand);
                     }
                     self.usages.insert(new.id, VecDeque::from([Usage::Free]));
                     first_use = Usage::Free;
@@ -582,20 +582,13 @@ impl <'a> InstructionBuilder <'a> {
             if let Some(dest) = operation.dest {
                 let usage = *self.usages.get_mut(&dest.id).unwrap().front().unwrap();
                 let first = *operation.operands.first().unwrap();
+                first.merge_into(dest);
                 match usage {
                     Usage::Use => {
                         debug_assert!(self.register_state.is_free(dest));
-                        first.merge_into(dest);
                         self.usages.insert(first.id, self.usages[&dest.id].clone());
                     },
                     Usage::Restore => {
-                        let first_location = self.register_state.allocation_bitmap(first);
-                        let dest_location = self.register_state.allocation_bitmap(dest);
-                        if first_location != dest_location {
-                            println!("Mov1 {}, {}", self.register_state.to_string(dest.allocation.get()), self.register_state.to_string(first.allocation.get()));
-                            self.register_state.build_instruction(OperationType::Mov, &[dest, first]);
-                            self.register_state.restore_allocation(dest);
-                        }
                         let dest_usages = self.usages.get_mut(&dest.id).unwrap();
                         dest_usages.pop_front().unwrap();
                         let clone = dest_usages.clone();
@@ -608,7 +601,7 @@ impl <'a> InstructionBuilder <'a> {
             for &operand in &operation.operands {
                 let usage = self.usages.get_mut(&operand.id).unwrap().pop_front().unwrap();
                 if usage != Usage::Use {
-                    self.register_state.free(operand, usage == Usage::TempFree);
+                    self.register_state.free(operand);
                 }
             }
         }

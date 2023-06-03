@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use crate::language::amd_win64::instruction::{Instruction, InstructionOperand};
 use crate::language::amd_win64::operation::{Operand, OperandSize, OperationType};
 
@@ -63,9 +64,12 @@ pub struct RegisterState {
     memory : Vec<bool>,
     allocations : Vec<MemoryAllocation>,
     free_gen : u64, // Bitmap of all free general purpose registers
-    temp_free_gen : u64,
+    home_gen : u64, // Bitmap of all registers that are a home location
+    home_locations : HashMap<usize, MemoryAllocation>,
+    block_stack : Vec<Vec<(bool)>>, //
     pub output : Vec<Instruction>
 }
+
 
 pub fn register_string(bitmap : u64) -> &'static str {
     match bitmap {
@@ -79,7 +83,7 @@ pub fn register_string(bitmap : u64) -> &'static str {
 }
 
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum MemoryAllocation {
     Register(usize, OperandSize), // Represents a register
     Memory(usize, OperandSize), // Represents stack memory
@@ -133,8 +137,8 @@ impl RegisterState {
         // All operands have a 0-initialized id field, make sure this means no allocation.
         let allocations = vec![MemoryAllocation::None];
         RegisterState {
-            registers, memory : Vec::new(), allocations, free_gen : GEN_REG, temp_free_gen : 0,
-            output : Vec::new()
+            registers, memory : Vec::new(), allocations, free_gen : GEN_REG, home_gen : 0,
+            home_locations : HashMap::new(), output : Vec::new()
         }
     }
 
@@ -212,7 +216,6 @@ impl RegisterState {
             operand.allocation.replace(state.allocations.len());
             state.allocations.push(MemoryAllocation::Register(index, operand.size));
             state.free_gen &= !state.registers[index].bitmap;
-            state.temp_free_gen &= !state.registers[index].bitmap;
             return state.registers[index].bitmap;
         }
 
@@ -245,7 +248,7 @@ impl RegisterState {
         let prev_owner = self.registers[location].operand.unwrap();
         // Try moving previous allocation to some other register
         let size = self.allocations[prev_owner].size();
-        if let Some(reg) = Self::get_register(self.free_gen & !self.registers[location].bitmap & !invalidated & !self.temp_free_gen) {
+        if let Some(reg) = Self::get_register(self.free_gen & !self.registers[location].bitmap & !invalidated & !self.home_gen) {
             // Insert Move
             self.allocations[prev_owner] = MemoryAllocation::Register(reg, size);
             self.registers[reg].operand = Some(prev_owner);
@@ -264,14 +267,11 @@ impl RegisterState {
     }
 
     // Make register / memory used by operand available again.
-    pub fn free(&mut self, operand : &Operand, temp_free : bool) {
+    pub fn free(&mut self, operand : &Operand) {
         match self.allocations[operand.allocation.get()] {
             MemoryAllocation::Register(reg, _)=> {
                 self.registers[reg].operand = None;
                 self.free_gen |= self.registers[reg].bitmap;
-                if temp_free {
-                    self.temp_free_gen |= self.registers[reg].bitmap;
-                }
             }
             MemoryAllocation::Memory(index, size) => {
                 self.memory[index..(index + size as usize)].fill(false);
@@ -280,26 +280,50 @@ impl RegisterState {
             MemoryAllocation::Hint(_) | MemoryAllocation::None => panic!("Double free")
         }
         // This allocation might be restored, no reason to clear the allocation
-        //self.allocations[operand.allocation.get()] = MemoryAllocation::None;
+        self.allocations[operand.allocation.get()] = MemoryAllocation::None;
     }
 
-    pub fn restore_allocation(&mut self, operand: &Operand) {
-        match self.allocations[operand.allocation.get()] {
-            MemoryAllocation::Register(index, _) => {
-                if let Some(val) = self.registers[index].operand {
-                    println!("{}", register_string(self.registers[index].bitmap));
-                }
-                debug_assert!(self.registers[index].operand.is_none());
-                self.registers[index].operand.replace(operand.allocation.get());
-            }
-            MemoryAllocation::Memory(index, size) => {
-                debug_assert!(self.memory[index..(index + size as usize)].iter().all(|b| !*b));
-                self.memory[index..(index + size as usize)].fill(true);
-            }
+    pub fn set_home(&mut self, operand : &Operand) {
+        let allocation = self.allocation_bitmap(operand);
+        self.home_gen &= !allocation;
+        self.home_locations.insert(operand.id, self.allocations[operand.allocation.get()]);
+    }
 
-            MemoryAllocation::Immediate(_, _) | MemoryAllocation::Address(_) |
-            MemoryAllocation::Hint(_) | MemoryAllocation::None => panic!("Not restorable location")
+    pub fn push_state(&mut self, operands : &Vec<&Operand>) {
+        for operand in operands {
+            self.register_state.restore_allocation(operand);
         }
+    }
+
+    pub fn pop_state(&mut self,)
+
+    pub fn restore_allocation(&mut self, operand: &Operand) {
+        if self.is_free(operand) {
+            return;
+        }
+        let home = self.home_locations.get(&operand.id).unwrap();
+        let index = operand.allocation.get();
+        let prev = self.allocations[index];
+        if home != &prev {
+            let val = self.get_val(index);
+            let s = self.to_string(index);
+            self.allocations[index] = *home;
+            println!("Move4 {}, {}", self.to_string(index), s);
+            self.output.push(Instruction::new(OperationType::Mov, home.size(), vec![self.get_val(index), val]));
+            match self.allocations[index] {
+                MemoryAllocation::Register(index, _) => {
+                    debug_assert!(self.registers[index].operand.is_none());
+                    self.registers[index].operand.replace(operand.allocation.get());
+                }
+                MemoryAllocation::Memory(index, size) => {
+                    debug_assert!(self.memory[index..(index + size as usize)].iter().all(|b| !*b));
+                    self.memory[index..(index + size as usize)].fill(true);
+                }
+                MemoryAllocation::Immediate(_, _) | MemoryAllocation::Address(_) |
+                MemoryAllocation::Hint(_) | MemoryAllocation::None => panic!("Not valid home location")
+            }
+        }
+
     }
 
     // Move all allocations that are contained in map to some register not in map.
@@ -314,7 +338,7 @@ impl RegisterState {
                     let val = self.get_val(index);
                     let size = self.allocations[index].size();
                     // Try to find free register, if none exists use memory
-                    if let Some(reg) = Self::get_register(self.free_gen & !map & !self.temp_free_gen) {
+                    if let Some(reg) = Self::get_register(self.free_gen & !map & !self.home_gen) {
                         self.allocations[index] = MemoryAllocation::Register(reg, size);
                         self.registers[reg].operand = Some(index);
                         self.free_gen &= !self.registers[reg].bitmap;

@@ -83,7 +83,7 @@ impl BlockStatementParser for IfBlockParser {
         }))
     }
 
-    fn add_statement(&mut self, parser: &mut Parser, statement: StatementData) -> Result<(), ParseError> {
+    fn add_statement(&mut self, _parser: &mut Parser, statement: StatementData) -> Result<(), ParseError> {
         self.statements.last_mut().unwrap().block.push(statement);
         Ok(())
     }
