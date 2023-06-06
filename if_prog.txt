@@ -1,4 +1,62 @@
 u32 a;
+start {
+    a = 10;
+    if a == true {
+        a = 20;
+    } else {
+        a = 11;
+    }
+    exit_code = a;
+} end
+(id, row)
+EnterScope
+Mov [tmp, im(10)] => a
+Cmp [im(1), im(1)] => None
+JmpNe --
+EnterScope
+Mov [tmp, im(20)] => a
+LeaveScope
+Jmp --
+EnterScope
+Mov [tmp, im(11)] => a
+LeaveScope
+Mov [tmp, a] => exit_code
+MovRet [exit_code] => tmp(out)
+LeaveScope
+
+0 : a
+1 : exit_code
+2 : im(10)
+3 : _temp()
+4 : im(1)
+5 : im(1)
+6 : addr(8)
+7 : im(20)
+8 : _temp()
+9 : addr(11)
+10 : im(11)
+11 : _temp()
+12 : _temp()
+13 : out
+
+{(7, 5), (0, 11), (10, 4), (7, 8), (6, 3), (11, 4), (10, 9), (12, 11), (4, 2), (11, 9), (8, 8), (2, 1), (13, 12), (3, 1), (1, 12), (5, 2), (8, 5), (9, 7)}
+{(8, 8), (8, 5), (2, 1), (13, 12), (9, 7), (7, 5), (11, 4), (10, 4), (12, 11), (0, 11), (7, 8), (6, 3), (10, 9), (5, 2), (11, 9), (4, 2), (3, 1), (1, 12), (0, 1)}
+0: EnterBlock                                                       |
+1: Operation { operator: Mov, operands: [3, 2], dest: Some(0) }     | (free : 0), (last : 2), (last : 3)
+2: Operation { operator: Cmp, operands: [4, 5], dest: None }        | (last : 4), (last : 5)
+3: Operation { operator: JmpNE, operands: [6], dest: None }         | (last : 6)
+4: EnterBlock                                                       | (last : 10), (last : 11)
+5: Operation { operator: Mov, operands: [8, 7], dest: Some(0) }     | (last : 7), (last : 8)
+6: LeaveBlock                                                       |
+7: Operation { operator: Jmp, operands: [9], dest: None }           | (last : 9)
+8: EnterBlock                                                       | (last : 7), (last : 8)
+9: Operation { operator: Mov, operands: [11, 10], dest: Some(0) }   | (last : 10), (last : 11)
+10: LeaveBlock                                                      |
+11: Operation { operator: Mov, operands: [12, 0], dest: Some(1) }   | (last : 0), (last : 12)
+12: Operation { operator: MovRet, operands: [1], dest: Some(13) }   | (last : 1), (last : 13)
+13: LeaveBlock                                                      |
+
+u32 a;
 u32 b;
 bool c;
 start {
