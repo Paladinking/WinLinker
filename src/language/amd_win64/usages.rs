@@ -100,8 +100,6 @@ impl UsageTracker {
                 }
             }
         }
-        println!("{:?}", self.final_usages);
-        println!("{:?}", self.free_usages);
         self.usage_queue.clear();
         self.usage_queue.shrink_to_fit();
     }

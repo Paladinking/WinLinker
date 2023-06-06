@@ -12,7 +12,7 @@ use crate::language::amd_win64::operation::{Operand, OperandSize, OperationType}
 //  in this order when it does not work well, this ordering is only a tiebreaker.
 //
 // These bitmaps are also used to determine what registers can be used for what operation.
-// Important that 2^1 is not a register, otherwise subtraction overflow in get_register()
+// Important that 2^0 is not a register, otherwise subtraction overflow in get_register()
 //  in case of empty bitmap.
 pub const MEM : u64 = 2_u64.pow(0);
 pub const R15 : u64 = 2_u64.pow(1);
@@ -205,7 +205,7 @@ impl RegisterState {
     }
 
     // Allocates a location for operand to a location contained in bitmap.
-    // Potentially inserts a move to free a register, moving it to another
+    // Potentially inserts a move in order to free a register, moving the value to another
     // register or memory location. The destination of such a move will not be to
     // any location contained in invalidated.
     pub fn allocate(&mut self, operand : &Operand, bitmap : u64, invalidated : u64, invalid_soon : u64) -> u64 {
