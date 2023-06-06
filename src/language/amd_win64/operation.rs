@@ -165,14 +165,17 @@ impl IdTracker {
 #[derive(Debug)]
 pub struct Operand {
     pub allocation: Cell<usize>, // Index of allocated MemoryLocation
-    pub size : OperandSize
+    pub size : OperandSize,
+    pub hint : u64
 }
 
 
 impl Operand {
     pub fn new(size : OperandSize) -> Operand {
         Operand {
-            allocation: Cell::new(0), size
+            allocation: Cell::new(0),
+            size,
+            hint : u64::MAX // Full bitmap to allow bitwise and
         }
     }
 

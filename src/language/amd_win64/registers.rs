@@ -82,13 +82,14 @@ pub fn register_string(bitmap : u64) -> &'static str {
 }
 
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, PartialEq)]
 enum MemoryAllocation {
+    Variable(Option<Box<MemoryAllocation>>), // Contains register or memory when variable is 'alive'.
     Register(usize, OperandSize), // Represents a register
     Memory(usize, OperandSize), // Represents stack memory
     Immediate(u64, u64), // Represents an immediate value, (val, bitmap)
     Address(usize), // Represents a jump label, containing an operand index.
-    Hint(u64), // Hint with a bitmap containing good registers to allocate
+    //Hint(u64), // Hint with a bitmap containing good registers to allocate
     None // Unallocated
 }
 
@@ -97,6 +98,7 @@ impl MemoryAllocation {
     // Used when moving a previous allocation to memory.
     fn size(&self) -> OperandSize {
         match self {
+            MemoryAllocation::Variable(Some(allocation)) => allocation.size(),
             MemoryAllocation::Register(_, size) |
             MemoryAllocation::Memory(_, size) => *size,
             MemoryAllocation::Immediate(_, bitmap) => match *bitmap {
@@ -108,7 +110,7 @@ impl MemoryAllocation {
             },
             // Not always correct, but no usage 'should' care
             MemoryAllocation::Address(_) => OperandSize::QWORD,
-            MemoryAllocation::Hint(_) | MemoryAllocation::None => panic!("Size on non allocation")
+            MemoryAllocation::Variable(None) | MemoryAllocation::None => panic!("Size on non allocation")
         }
     }
 }
@@ -178,6 +180,17 @@ impl RegisterState {
 
     fn get_val(&self, id : usize) -> InstructionOperand {
         match self.allocations[id] {
+            MemoryAllocation::Variable(Some(ref allocation)) => {
+                match **allocation {
+                    MemoryAllocation::Register(i, _) => {
+                        InstructionOperand::Reg(self.registers[i].encoding)
+                    },
+                    MemoryAllocation::Memory(i, _) => {
+                        InstructionOperand::Mem(i as u32)
+                    },
+                    _ => panic!("Invalid variable allocation")
+                }
+            }
             MemoryAllocation::Register(i, _) => {
                 InstructionOperand::Reg(self.registers[i].encoding)
             }
@@ -190,7 +203,7 @@ impl RegisterState {
             MemoryAllocation::Address(adr) => {
                 InstructionOperand::Addr(adr)
             }
-            MemoryAllocation::Hint(_) | MemoryAllocation::None => panic!("No allocation")
+            MemoryAllocation::None | MemoryAllocation::Variable(None) => panic!("No allocation")
         }
     }
 
@@ -202,6 +215,14 @@ impl RegisterState {
         ).collect();
         self.output.push(Instruction::new(operation, size, vals));
 
+    }
+
+    fn allocate_reg(&mut self, operand : &Operand, index : usize) -> u64 {
+        self.registers[index].operand = Some(self.allocations.len());
+        operand.allocation.replace(self.allocations.len());
+        self.allocations.push(MemoryAllocation::Register(index, operand.size));
+        self.free_gen &= !self.registers[index].bitmap;
+        return self.registers[index].bitmap;
     }
 
     // Allocates a location for operand to a location contained in bitmap.
@@ -220,12 +241,12 @@ impl RegisterState {
 
         // The operand might not be free if TempFree and Restore are used incorrectly
         debug_assert!(self.is_free(operand));
-        // Try to allocate to hinted + not invalidated register
+        /*// Try to allocate to hinted + not invalidated register
         if let MemoryAllocation::Hint(map) = self.allocations[operand.allocation.get()] {
             if let Some(index) = Self::get_register(map & bitmap & self.free_gen & !invalid_soon) {
                 return allocate_reg(self, index, operand);
             }
-        }
+        }*/
         // Try to allocate to not invalidated register
         if let Some(index) = Self::get_register(bitmap & self.free_gen & !invalid_soon) {
             return allocate_reg(self, index, operand);
@@ -268,7 +289,19 @@ impl RegisterState {
     // Make register / memory used by operand available again.
     pub fn free(&mut self, operand : &Operand) {
         match self.allocations[operand.allocation.get()] {
-            MemoryAllocation::Register(reg, _)=> {
+            MemoryAllocation::Variable(Some(ref allocation)) => {
+                match **allocation {
+                    MemoryAllocation::Register(reg, _) => {
+                        self.registers[reg].operand = None;
+                        self.free_gen |= self.registers[reg].bitmap;
+                    },
+                    MemoryAllocation::Memory(index, size) => {
+                        self.memory[index..(index + size as usize)].fill(false);
+                    },
+                    _ => panic!("Invalid variable allocation")
+                }
+            }
+            MemoryAllocation::Register(reg, _) => {
                 self.registers[reg].operand = None;
                 self.free_gen |= self.registers[reg].bitmap;
             }
@@ -276,7 +309,7 @@ impl RegisterState {
                 self.memory[index..(index + size as usize)].fill(false);
             },
             MemoryAllocation::Immediate(..) | MemoryAllocation::Address(_) => {},
-            MemoryAllocation::Hint(_) | MemoryAllocation::None => panic!("Double free")
+            MemoryAllocation::None | MemoryAllocation::Variable(None) => panic!("Double free")
         }
         // This allocation might be restored, no reason to clear the allocation
         self.allocations[operand.allocation.get()] = MemoryAllocation::None;
@@ -339,7 +372,7 @@ impl RegisterState {
                     let val = self.get_val(index);
                     let size = self.allocations[index].size();
                     // Try to find free register, if none exists use memory
-                    if let Some(reg) = Self::get_register(self.free_gen & !map & !self.home_gen) {
+                    if let Some(reg) = Self::get_register(self.free_gen & !map) {
                         self.allocations[index] = MemoryAllocation::Register(reg, size);
                         self.registers[reg].operand = Some(index);
                         self.free_gen &= !self.registers[reg].bitmap;
@@ -358,27 +391,50 @@ impl RegisterState {
 
     pub fn is_free(&self, operand : &Operand) -> bool {
         match self.allocations[operand.allocation.get()] {
+            MemoryAllocation::Variable(Some(_)) |
             MemoryAllocation::Register(_, _) | MemoryAllocation::Memory(_, _) |
             MemoryAllocation::Immediate(_, _) | MemoryAllocation::Address(_)=> false,
-            MemoryAllocation::Hint(_) | MemoryAllocation::None => true
+            MemoryAllocation::None | MemoryAllocation::Variable(None) => true
         }
     }
 
     pub fn allocation_bitmap(&self, operand : &Operand) -> u64 {
         match self.allocations[operand.allocation.get()] {
+            MemoryAllocation::Variable(Some(ref allocation)) => {
+                match **allocation {
+                    MemoryAllocation::Register(i, _) => self.registers[i].bitmap,
+                    MemoryAllocation::Memory(_, _) => MEM,
+                    _ => panic!("Invalid variable allocation")
+                }
+            }
             MemoryAllocation::Register(i, _) => self.registers[i].bitmap,
             MemoryAllocation::Memory(_, _) => MEM,
             MemoryAllocation::Immediate(_, bitmap) => bitmap,
             // Since no operation uses both imm and address values in the same slot,
             // Addresses uses the IMM64 bitmap
             MemoryAllocation::Address(_) => IMM64,
-            MemoryAllocation::Hint(_) |
-            MemoryAllocation::None => panic!("Allocation bitmap on non-allocated operand")
+            MemoryAllocation::None | MemoryAllocation::Variable(None) =>
+                panic!("Allocation bitmap on non-allocated operand")
         }
     }
 
     pub fn to_string(&self, id : usize) -> String {
         match self.allocations[id] {
+            MemoryAllocation::Variable(None) => {
+                "Variable(None)".to_owned()
+            },
+            MemoryAllocation::Variable(Some(ref allocation)) => {
+                let s = match **allocation {
+                    MemoryAllocation::Register(i, _) => {
+                        register_string(self.registers[i].bitmap).to_owned()
+                    },
+                    MemoryAllocation::Memory(i, _) => {
+                        "mem(".to_owned() + &i.to_string() + ")"
+                    },
+                    _ => panic!("Invalid variable allocation")
+                };
+                "Variable(".to_owned() + &s + ")"
+            }
             MemoryAllocation::Register(i, _) => {
                 register_string(self.registers[i].bitmap).to_owned()
             }
@@ -390,9 +446,6 @@ impl RegisterState {
             },
             MemoryAllocation::Address(i) => {
                 "addr(".to_owned() + &i.to_string() + ")"
-            }
-            MemoryAllocation::Hint(_) => {
-                "Hint".to_string()
             },
             MemoryAllocation::None => {
                 "None".to_owned()
@@ -416,53 +469,15 @@ impl RegisterState {
         operand.allocation.replace(self.allocations.len() - 1);
     }
 
-    // Adds a bitmap hint containing good registers to operand.
-    // Tries to combine it with previous hints.
-    pub fn allocate_hint(&mut self, operand : &Operand, hint : u64) {
-        if let MemoryAllocation::None = self.allocations[operand.allocation.get()] {
-            // Allocate new hint
-            self.allocations.push(MemoryAllocation::Hint(hint));
-            operand.allocation.replace(self.allocations.len() - 1);
-        } else if let MemoryAllocation::Hint(ref mut prev_hint) = self.allocations[operand.allocation.get()] {
-            if *prev_hint & hint == 0 {
-                // If the old and new hint had no overlap two registers will have to be used
-                // Better to not destroy all hint information, allocate separate hint.
-                self.allocations.push(MemoryAllocation::Hint(hint));
-                operand.allocation.replace(self.allocations.len() - 1);
-            } else {
-                // Combine old and new hint
-                *prev_hint &= hint;
+    pub fn allocate_variable(&mut self, operand : &Operand, invalid_soon : u64) {
+        for bitmap in [operand.hint & !invalid_soon, operand.hint, !invalid_soon, GEN_REG] {
+            if let Some(location) = Self::get_register(self.free_gen & bitmap) {
+                self.registers[location].operand = Some(self.allocations.len());
+                operand.allocation.replace(self.allocations.len());
+                self.allocations.push(MemoryAllocation::Register(location, operand.size));
+                self.free_gen &= !self.registers[location].bitmap;
+                return;
             }
         }
-    }
-
-    // Makes dest use the same hint as source
-    pub fn propagate_hint(&mut self, source : &Operand, dest : &Operand) {
-        // Dest 'should' always be None now, but it might be an immediate or something at some point.
-        // Make sure this assumption does not become wrong undetected.
-        debug_assert!(self.is_free(dest));
-        if let MemoryAllocation::Hint(hint) = self.allocations[dest.allocation.get()] {
-            if let MemoryAllocation::Hint(h) = self.allocations[source.allocation.get()] {
-                // Try to combine the hints
-                if hint & h != 0 {
-                    self.allocations[dest.allocation.get()] = MemoryAllocation::Hint(hint & h);
-                }
-            }
-        } else {
-            if let MemoryAllocation::Hint(_) = self.allocations[source.allocation.get()] {
-                dest.allocation.replace(source.allocation.get());
-            }
-        }
-    }
-
-    // Propagates a pre-allocated operand (variable) to the hint of it's usages.
-    pub fn hint_from_allocation(&mut self, source : &Operand, dest : &Operand) {
-        if let MemoryAllocation::Register(index, _) = self.allocations[dest.allocation.get()] {
-            let bitmap = self.registers[index].bitmap;
-            if let MemoryAllocation::Hint(hint) = &mut self.allocations[source.allocation.get()] {
-                *hint = bitmap;
-            }
-        }
-
     }
 }

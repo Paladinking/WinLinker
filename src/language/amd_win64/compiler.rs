@@ -190,6 +190,7 @@ pub struct InstructionBuilder <'a> {
     // Usages map, operand id to vec of (scope_id, operations_index).
     usage_tracker : UsageTracker,
     operands : Vec<Operand>,
+    variable_count : usize,
     arena : &'a Bump,
     register_state : RegisterState,
     tracker : IdTracker,
@@ -207,17 +208,29 @@ impl <'a> InstructionBuilder <'a> {
         let exit_code = vars.get("exit_code").unwrap().id.get().unwrap();
         let mut builder = InstructionBuilder {
             operations: Vec::new(), invalidations : Vec::new(), usage_tracker : UsageTracker::new(),
-            operands, arena, register_state, tracker, exit_code
+            operands, arena, register_state, tracker, exit_code, variable_count : vars.len()
         };
         builder
     }
 
     fn add_operation(&mut self, operation : OperationType, operands : Vec<usize>, dest : Option<usize>) {
-        for op in &operands {
-            self.usage_tracker.add_usage(*op, self.operations.len(), true);
+        for (i, &operand) in operands.iter().enumerate() {
+            self.usage_tracker.add_usage(operand, self.operations.len(), true);
+            let hint = operation.bitmap_hint(i, self.operands[operand].size);
+            let new_hint = hint & self.operands[operand].hint;
+            if new_hint != 0 {
+                self.operands[operand].hint = new_hint;
+            }
         }
+
         if let Some(op) = &dest {
             self.usage_tracker.add_usage(*op, self.operations.len(), false);
+            if let Some(first) = operands.first() {
+                let new_hint = self.operands[*op].hint & self.operands[*first].hint;
+                if new_hint != 0 {
+                    self.operands[*op].hint = new_hint;
+                }
+            }
         }
         self.operations.push(OperationUnit::Operation(Operation::new(operation, operands, dest)));
     }
@@ -378,49 +391,10 @@ impl <'a> InstructionBuilder <'a> {
         self.add_operation(OperationType::MovRet, vec![self.exit_code], Some(out));
         self.operations.push(OperationUnit::LeaveBlock);
         self.usage_tracker.leave_scope();
-        self.usage_tracker.finalize();
+        self.usage_tracker.finalize(self.variable_count);
         self
     }
 
-    // Allocate hints for what registers should be used
-    // Allows e.g using rax if later instruction uses mul
-    fn allocate_hints(&mut self, home_locations : &mut Vec<u64>) {
-        /*for operation in self.operations.iter() {
-            let operation = if let OperationUnit::Operation(operation) = operation {
-                operation
-            } else {
-                continue;
-            };
-            for (i, &operand) in operation.operands.iter().enumerate() {
-                let hint = operation.operator.bitmap_hint(i, operand.size);
-                self.register_state.allocate_hint(operand, hint);
-            }
-            // Propagate the hint to dest to allow combining with future instructions
-            if let (Some(dest), &first) = (operation.dest, operation.operands.first().unwrap()) {
-                self.register_state.propagate_hint(first, dest);
-            }
-        }
-        // self.operands contains all variable operands, these are pre-allocated and then freed.
-        // This means they can be restored to their home positions later.
-        *home_locations = self.operands.iter().map(|operand|
-            self.register_state.allocate(operand, MEM_GEN_REG, 0, 0)
-        ).collect();
-        for operand in &self.operands {
-            self.register_state.set_home(operand);
-            self.register_state.free(operand);
-        }
-        for operation in self.operations.iter() {
-            let operation = if let OperationUnit::Operation(operation) = operation {
-                operation
-            } else {
-                continue;
-            };
-            // Propagate the hint to dest to allow combining with future instructions
-            if let (Some(dest), &first) = (operation.dest, operation.operands.first().unwrap()) {
-                self.register_state.hint_from_allocation(first, dest);
-            }
-        }*/
-    }
 
     pub fn compile(mut self) {
         for (index, operation) in self.operations.iter_mut().enumerate() {
@@ -436,6 +410,15 @@ impl <'a> InstructionBuilder <'a> {
                 }
             }
         }
+        /*for (index, operation) in self.operations.iter().enumerate() {
+            match operation {
+                OperationUnit::EnterBlock(id) => {
+                    for operand_id in self.usage_tracker.get_initializations(*id) {
+                        self.register_state.allocate_variable(&self.operands[operand_id]);
+                    }
+                }
+            }
+        }*/
         /*
         let mut home_locations = Vec::new();
         self.allocate_hints(&mut home_locations);
