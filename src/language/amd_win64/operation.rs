@@ -70,6 +70,25 @@ impl OperationType {
         }
     }
 
+    pub fn invalidations(&self, size : OperandSize) -> u64 {
+        match self {
+            OperationType::IMul => if size == OperandSize::BYTE { RAX } else { 0 },
+            OperationType::Mul => if size == OperandSize::BYTE { RAX } else {RDX | RAX},
+            OperationType::IDiv | OperationType::Div => RDX | RAX,
+            OperationType::Add | OperationType::Sub | OperationType::And |
+            OperationType::Or | OperationType::Xor | OperationType::Push |
+            OperationType::Pop | OperationType::Cmp | OperationType::SetE |
+            OperationType::SetNE | OperationType::SetA | OperationType::SetB |
+            OperationType::SetAE | OperationType::SetBE | OperationType::SetG |
+            OperationType::SetL | OperationType::SetGE | OperationType::SetLE |
+            OperationType::JmpE | OperationType::JmpNE | OperationType::JmpA |
+            OperationType::JmpB | OperationType::JmpAE | OperationType::JmpBE |
+            OperationType::JmpG | OperationType::JmpL | OperationType::JmpGE |
+            OperationType::JmpLE | OperationType::Jmp | OperationType::JmpNop |
+            OperationType::Mov | OperationType::MovRet => 0
+        }
+    }
+
     pub fn first_bitmap(&self, size : OperandSize) -> u64 {
         match self {
             OperationType::Div | OperationType::IDiv |
@@ -166,7 +185,8 @@ impl IdTracker {
 pub struct Operand {
     pub allocation: Cell<usize>, // Index of allocated MemoryLocation
     pub size : OperandSize,
-    pub hint : u64
+    pub hint : u64,
+    pub home : Option<usize>
 }
 
 
@@ -175,7 +195,8 @@ impl Operand {
         Operand {
             allocation: Cell::new(0),
             size,
-            hint : u64::MAX // Full bitmap to allow bitwise and
+            hint : u64::MAX, // Full bitmap to allow bitwise and
+            home : None
         }
     }
 

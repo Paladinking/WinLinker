@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use crate::language::amd_win64::instruction::{Instruction, InstructionOperand};
-use crate::language::amd_win64::operation::{Operand, OperandSize, OperationType};
+use crate::language::amd_win64::operation::{Operand, OperandSize, Operation, OperationType};
 
 
 // Bitmaps of all locations an operand can be allocated at.
@@ -64,11 +64,11 @@ pub struct RegisterState {
     memory : Vec<bool>,
     allocations : Vec<MemoryAllocation>,
     free_gen : u64, // Bitmap of all free general purpose registers
-    home_gen : u64, // Bitmap of all registers that are a home location
-    home_locations : HashMap<usize, MemoryAllocation>,
+    variables : Vec<(usize, MemoryAllocation)>,
+    variable_map : u64, // Bitmap of all variables in registers
+    saved_variables : Vec<HashMap<usize, MemoryAllocation>>,
     pub output : Vec<Instruction>
 }
-
 
 pub fn register_string(bitmap : u64) -> &'static str {
     match bitmap {
@@ -82,9 +82,8 @@ pub fn register_string(bitmap : u64) -> &'static str {
 }
 
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 enum MemoryAllocation {
-    Variable(Option<Box<MemoryAllocation>>), // Contains register or memory when variable is 'alive'.
     Register(usize, OperandSize), // Represents a register
     Memory(usize, OperandSize), // Represents stack memory
     Immediate(u64, u64), // Represents an immediate value, (val, bitmap)
@@ -98,7 +97,6 @@ impl MemoryAllocation {
     // Used when moving a previous allocation to memory.
     fn size(&self) -> OperandSize {
         match self {
-            MemoryAllocation::Variable(Some(allocation)) => allocation.size(),
             MemoryAllocation::Register(_, size) |
             MemoryAllocation::Memory(_, size) => *size,
             MemoryAllocation::Immediate(_, bitmap) => match *bitmap {
@@ -110,7 +108,7 @@ impl MemoryAllocation {
             },
             // Not always correct, but no usage 'should' care
             MemoryAllocation::Address(_) => OperandSize::QWORD,
-            MemoryAllocation::Variable(None) | MemoryAllocation::None => panic!("Size on non allocation")
+            MemoryAllocation::None => panic!("Size on non allocation")
         }
     }
 }
@@ -138,8 +136,8 @@ impl RegisterState {
         // All operands have a 0-initialized id field, make sure this means no allocation.
         let allocations = vec![MemoryAllocation::None];
         RegisterState {
-            registers, memory : Vec::new(), allocations, free_gen : GEN_REG, home_gen : 0,
-            home_locations : HashMap::new(), output : Vec::new()
+            registers, memory : Vec::new(), allocations, free_gen : GEN_REG,
+            variables : Vec::new(), variable_map : 0, saved_variables : Vec::new(), output : Vec::new()
         }
     }
 
@@ -180,17 +178,6 @@ impl RegisterState {
 
     fn get_val(&self, id : usize) -> InstructionOperand {
         match self.allocations[id] {
-            MemoryAllocation::Variable(Some(ref allocation)) => {
-                match **allocation {
-                    MemoryAllocation::Register(i, _) => {
-                        InstructionOperand::Reg(self.registers[i].encoding)
-                    },
-                    MemoryAllocation::Memory(i, _) => {
-                        InstructionOperand::Mem(i as u32)
-                    },
-                    _ => panic!("Invalid variable allocation")
-                }
-            }
             MemoryAllocation::Register(i, _) => {
                 InstructionOperand::Reg(self.registers[i].encoding)
             }
@@ -203,7 +190,7 @@ impl RegisterState {
             MemoryAllocation::Address(adr) => {
                 InstructionOperand::Addr(adr)
             }
-            MemoryAllocation::None | MemoryAllocation::Variable(None) => panic!("No allocation")
+            MemoryAllocation::None => panic!("No allocation")
         }
     }
 
@@ -215,14 +202,6 @@ impl RegisterState {
         ).collect();
         self.output.push(Instruction::new(operation, size, vals));
 
-    }
-
-    fn allocate_reg(&mut self, operand : &Operand, index : usize) -> u64 {
-        self.registers[index].operand = Some(self.allocations.len());
-        operand.allocation.replace(self.allocations.len());
-        self.allocations.push(MemoryAllocation::Register(index, operand.size));
-        self.free_gen &= !self.registers[index].bitmap;
-        return self.registers[index].bitmap;
     }
 
     // Allocates a location for operand to a location contained in bitmap.
@@ -241,23 +220,16 @@ impl RegisterState {
 
         // The operand might not be free if TempFree and Restore are used incorrectly
         debug_assert!(self.is_free(operand));
-        /*// Try to allocate to hinted + not invalidated register
-        if let MemoryAllocation::Hint(map) = self.allocations[operand.allocation.get()] {
-            if let Some(index) = Self::get_register(map & bitmap & self.free_gen & !invalid_soon) {
+        // Try to allocate a free register, preferring hinted and not soon invalid.
+        for map in [operand.hint & !invalid_soon, operand.hint, !invalid_soon, GEN_REG] {
+            let bitmap = map & bitmap & self.free_gen;
+            if let Some(index) = Self::get_register(bitmap) {
                 return allocate_reg(self, index, operand);
             }
-        }*/
-        // Try to allocate to not invalidated register
-        if let Some(index) = Self::get_register(bitmap & self.free_gen & !invalid_soon) {
-            return allocate_reg(self, index, operand);
-        }
-        // Try to allocate to any free register
-        if let Some(index) = Self::get_register(bitmap & self.free_gen) {
-            return allocate_reg(self, index, operand);
         }
         // Try to allocate to memory
         if bitmap & MEM != 0 {
-            let index = self.get_memory(operand.size);
+            let index = operand.home.unwrap_or_else(|| self.get_memory(operand.size));
             operand.allocation.replace(self.allocations.len());
             self.allocations.push(MemoryAllocation::Memory(index, operand.size));
             return MEM;
@@ -268,7 +240,7 @@ impl RegisterState {
         let prev_owner = self.registers[location].operand.unwrap();
         // Try moving previous allocation to some other register
         let size = self.allocations[prev_owner].size();
-        if let Some(reg) = Self::get_register(self.free_gen & !self.registers[location].bitmap & !invalidated & !self.home_gen) {
+        if let Some(reg) = Self::get_register(self.free_gen & !self.registers[location].bitmap & !invalidated) {
             // Insert Move
             self.allocations[prev_owner] = MemoryAllocation::Register(reg, size);
             self.registers[reg].operand = Some(prev_owner);
@@ -286,31 +258,25 @@ impl RegisterState {
         return bitmap;
     }
 
-    // Make register / memory used by operand available again.
-    pub fn free(&mut self, operand : &Operand) {
-        match self.allocations[operand.allocation.get()] {
-            MemoryAllocation::Variable(Some(ref allocation)) => {
-                match **allocation {
-                    MemoryAllocation::Register(reg, _) => {
-                        self.registers[reg].operand = None;
-                        self.free_gen |= self.registers[reg].bitmap;
-                    },
-                    MemoryAllocation::Memory(index, size) => {
-                        self.memory[index..(index + size as usize)].fill(false);
-                    },
-                    _ => panic!("Invalid variable allocation")
-                }
-            }
+    fn free_allocation(&mut self, allocation : usize, free_mem : bool) {
+        match self.allocations[allocation] {
             MemoryAllocation::Register(reg, _) => {
                 self.registers[reg].operand = None;
                 self.free_gen |= self.registers[reg].bitmap;
             }
             MemoryAllocation::Memory(index, size) => {
-                self.memory[index..(index + size as usize)].fill(false);
+                if free_mem {
+                    self.memory[index..(index + size as usize)].fill(false);
+                }
             },
             MemoryAllocation::Immediate(..) | MemoryAllocation::Address(_) => {},
-            MemoryAllocation::None | MemoryAllocation::Variable(None) => panic!("Double free")
+            MemoryAllocation::None => panic!("Double free")
         }
+    }
+
+    // Make register / memory used by operand available again.
+    pub fn free(&mut self, operand : &Operand) {
+        self.free_allocation(operand.allocation.get(), operand.home.is_none());
         // This allocation might be restored, no reason to clear the allocation
         self.allocations[operand.allocation.get()] = MemoryAllocation::None;
     }
@@ -391,50 +357,26 @@ impl RegisterState {
 
     pub fn is_free(&self, operand : &Operand) -> bool {
         match self.allocations[operand.allocation.get()] {
-            MemoryAllocation::Variable(Some(_)) |
             MemoryAllocation::Register(_, _) | MemoryAllocation::Memory(_, _) |
             MemoryAllocation::Immediate(_, _) | MemoryAllocation::Address(_)=> false,
-            MemoryAllocation::None | MemoryAllocation::Variable(None) => true
+            MemoryAllocation::None => true
         }
     }
 
     pub fn allocation_bitmap(&self, operand : &Operand) -> u64 {
         match self.allocations[operand.allocation.get()] {
-            MemoryAllocation::Variable(Some(ref allocation)) => {
-                match **allocation {
-                    MemoryAllocation::Register(i, _) => self.registers[i].bitmap,
-                    MemoryAllocation::Memory(_, _) => MEM,
-                    _ => panic!("Invalid variable allocation")
-                }
-            }
             MemoryAllocation::Register(i, _) => self.registers[i].bitmap,
             MemoryAllocation::Memory(_, _) => MEM,
             MemoryAllocation::Immediate(_, bitmap) => bitmap,
             // Since no operation uses both imm and address values in the same slot,
             // Addresses uses the IMM64 bitmap
             MemoryAllocation::Address(_) => IMM64,
-            MemoryAllocation::None | MemoryAllocation::Variable(None) =>
-                panic!("Allocation bitmap on non-allocated operand")
+            MemoryAllocation::None => panic!("Allocation bitmap on non-allocated operand")
         }
     }
 
     pub fn to_string(&self, id : usize) -> String {
         match self.allocations[id] {
-            MemoryAllocation::Variable(None) => {
-                "Variable(None)".to_owned()
-            },
-            MemoryAllocation::Variable(Some(ref allocation)) => {
-                let s = match **allocation {
-                    MemoryAllocation::Register(i, _) => {
-                        register_string(self.registers[i].bitmap).to_owned()
-                    },
-                    MemoryAllocation::Memory(i, _) => {
-                        "mem(".to_owned() + &i.to_string() + ")"
-                    },
-                    _ => panic!("Invalid variable allocation")
-                };
-                "Variable(".to_owned() + &s + ")"
-            }
             MemoryAllocation::Register(i, _) => {
                 register_string(self.registers[i].bitmap).to_owned()
             }
@@ -469,15 +411,100 @@ impl RegisterState {
         operand.allocation.replace(self.allocations.len() - 1);
     }
 
-    pub fn allocate_variable(&mut self, operand : &Operand, invalid_soon : u64) {
+    // Call first when entering block
+    pub fn reserve_variables(&mut self, capacity : usize) {
+        self.saved_variables.push(HashMap::with_capacity(capacity));
+    }
+
+    // Call for each variable initialized in this block after calling reserve_variables
+    pub fn allocate_variable(&mut self, id : usize, operand : &mut Operand, invalid_soon : u64) {
         for bitmap in [operand.hint & !invalid_soon, operand.hint, !invalid_soon, GEN_REG] {
-            if let Some(location) = Self::get_register(self.free_gen & bitmap) {
-                self.registers[location].operand = Some(self.allocations.len());
-                operand.allocation.replace(self.allocations.len());
-                self.allocations.push(MemoryAllocation::Register(location, operand.size));
-                self.free_gen &= !self.registers[location].bitmap;
+            if let Some(location) = Self::get_register(self.free_gen & !self.variable_map & bitmap) {
+                let allocation = MemoryAllocation::Register(location, operand.size);
+                self.variable_map |= self.registers[location].bitmap;
+                self.saved_variables.last_mut().unwrap().insert(id, allocation);
+                if operand.hint & self.registers[location].bitmap != 0 {
+                    operand.hint &= self.registers[location].bitmap;
+                }
                 return;
             }
         }
+        let index = self.get_memory(operand.size);
+        operand.home.replace(index);
+        self.saved_variables.last_mut().unwrap().insert(
+            id, MemoryAllocation::Memory(index, operand.size));
     }
+
+    // Call after allocate_variables when entering block
+    pub fn enter_block(&mut self, operands : &Vec<Operand>) {
+        let size = self.variables.len();
+        for (id, all) in self.saved_variables.last().unwrap() {
+            self.variables.push((*id, all.clone()));
+        }
+        for (id, all) in &self.variables[0..size] {
+            if !self.is_free(&operands[*id]) {
+                self.saved_variables.last_mut().unwrap().insert(
+                    *id, self.allocations[operands[*id].allocation.get()].clone()
+                );
+            } else {
+                self.saved_variables.last_mut().unwrap().insert(
+                    *id, all.clone()
+                );
+            }
+        }
+    }
+
+    pub fn leave_block(&mut self, operands : &Vec<Operand>) {
+        let to_restore = self.saved_variables.pop().unwrap();
+        for (id, allocation) in to_restore {
+            let cur_allocation = operands[id].allocation.get();
+            if !self.is_free(&operands[id]) && self.allocations[cur_allocation].ne(&allocation) {
+                let val = self.get_val(cur_allocation);
+                let s = self.to_string(cur_allocation);
+                match &allocation {
+                    MemoryAllocation::Register(index, size) => {
+                        if let Some(all) = self.registers[*index].operand {
+                            let target = self.get_val(all);
+                            let scratch_size = self.allocations[all].size();
+                            if let Some(i) = Self::get_register(self.free_gen) {
+                                self.registers[i].operand.replace(all);
+                                self.allocations[all] = MemoryAllocation::Register(i, scratch_size);
+                            } else {
+                                let mem = self.get_memory(scratch_size);
+                                self.allocations[all] = MemoryAllocation::Memory(mem, scratch_size);
+                            };
+                            let scratch = self.get_val(all);
+                            self.output.push(Instruction::new(
+                                OperationType::Mov, scratch_size,
+                                vec![scratch, target.clone()]));
+                            self.output.push(Instruction::new(
+                                OperationType::Mov, *size, vec![target, val]));
+                            self.free_allocation(cur_allocation, true);
+                            self.allocations[cur_allocation] = allocation;
+                        } else {
+                            self.free_allocation(cur_allocation, true);
+                            self.allocations[cur_allocation] = allocation.clone();
+                            self.registers[*index].operand.replace(cur_allocation);
+                            println!("Move4 {}, {}", self.to_string(cur_allocation), s);
+                            self.output.push(Instruction::new(
+                                OperationType::Mov,
+                                *size, vec![self.get_val(cur_allocation), val]));
+                        }
+                    }
+                    MemoryAllocation::Memory(_, size) => {
+                        self.free_allocation(cur_allocation, true);
+                        self.allocations[cur_allocation] = allocation.clone();
+                        println!("Move4 {}, {}", self.to_string(cur_allocation), s);
+                        self.output.push(Instruction::new(
+                            OperationType::Mov,
+                            *size, vec![self.get_val(cur_allocation), val]));
+                    }
+                    _ => panic!("Invalid location")
+                }
+            }
+        }
+    }
+
+
+
 }

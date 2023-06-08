@@ -35,7 +35,7 @@ enum OperandType {
     Reg = 0, Mem = 1, Imm = 2, Addr = 3
 }
 
-#[derive(Derivative, Eq, Debug)]
+#[derive(Derivative, Eq, Debug, Clone)]
 #[derivative(PartialEq, Hash)]
 pub enum InstructionOperand {
     Reg(

@@ -4,7 +4,7 @@ use std::io::Write;
 use std::rc::Rc;
 use bumpalo::Bump;
 use crate::language::amd_win64::operation::IdTracker;
-use crate::language::amd_win64::usages::UsageTracker;
+use crate::language::amd_win64::usages::{UsageTracker, UsedAfter};
 use super::instruction::InstructionCompiler;
 use super::operation::{Operand, OperandSize, Operation, OperationType};
 use super::registers::*;
@@ -17,6 +17,15 @@ pub enum OperationUnit {
     Operation(Operation), // Real operation
     EnterBlock(usize),
     LeaveBlock
+}
+
+impl OperationUnit {
+    fn operation(&self) -> Option<&Operation> {
+        if let OperationUnit::Operation(ref op) = self {
+            return Some(op);
+        }
+        return None;
+    }
 }
 
 trait BlockCompiler<'a> {
@@ -186,8 +195,6 @@ pub struct AddressRelocation {
 
 pub struct InstructionBuilder <'a> {
     operations: Vec<OperationUnit>,
-    invalidations : Vec<(usize, u64)>,
-    // Usages map, operand id to vec of (scope_id, operations_index).
     usage_tracker : UsageTracker,
     operands : Vec<Operand>,
     variable_count : usize,
@@ -207,7 +214,7 @@ impl <'a> InstructionBuilder <'a> {
         }).collect();
         let exit_code = vars.get("exit_code").unwrap().id.get().unwrap();
         let mut builder = InstructionBuilder {
-            operations: Vec::new(), invalidations : Vec::new(), usage_tracker : UsageTracker::new(),
+            operations: Vec::new(), usage_tracker : UsageTracker::new(),
             operands, arena, register_state, tracker, exit_code, variable_count : vars.len()
         };
         builder
@@ -260,21 +267,11 @@ impl <'a> InstructionBuilder <'a> {
         } else {
             let operator = match op {
                 DualOperator::Divide => {
-                    self.invalidations.push((self.operations.len(), RDX | RAX));
                     if t.is_signed() { OperationType::IDiv } else { OperationType::Div }
                 },
                 DualOperator::Multiply => if t.is_signed() {
-                    if size == OperandSize::BYTE {
-                        self.invalidations.push((self.operations.len(), RAX));
-                    }
                     OperationType::IMul
                 } else {
-                    if size == OperandSize::BYTE {
-                        self.invalidations.push((self.operations.len(), RAX));
-                    } else {
-                        self.invalidations.push((self.operations.len(), RDX | RAX));
-                    }
-
                     OperationType::Mul
                 },
                 DualOperator::Minus => OperationType::Sub,
@@ -395,30 +392,149 @@ impl <'a> InstructionBuilder <'a> {
         self
     }
 
+    fn invalidation(&self, operation : &Operation) -> u64 {
+        if let Some(dest) = operation.dest {
+            operation.operator.invalidations(self.operands[dest].size)
+        } else {
+            0
+        }
+    }
+
+    // Not perfect, includes other scopes, but might rarely matter.
+    fn invalid_soon(&self, row : usize, scope : usize, operation : &Operation) -> u64 {
+        if let Some(dest) = operation.dest {
+            let next_free = self.usage_tracker.next_free(dest, row, scope);
+            if next_free == row {
+                return 0;
+            }
+            return self.operations[(row + 1)..next_free].iter()
+                .filter_map(|op| op.operation())
+                .fold(0, |map, operation|
+                    map | self.invalidation(operation))
+        }
+        return 0;
+    }
+
+
+    fn compile_operation(&mut self, operation : &Operation, row : usize, scope : usize) {
+
+    }
 
     pub fn compile(mut self) {
-        for (index, operation) in self.operations.iter_mut().enumerate() {
+        let mut scopes = Vec::new();
+        let mut operation_index_list = Vec::with_capacity(self.operations.len());
+        let mut used_stable = 0_u64;
+
+        let mut operations = std::mem::take(&mut self.operations);
+        for (index, operation) in operations.iter_mut().enumerate() {
             match operation {
-                OperationUnit::Operation(o) => {
-                    println!("{}: {:?}", index, o)
-                },
-                OperationUnit::EnterBlock(_) => {
-                    println!("{}: EnterBlock", index);
+                OperationUnit::EnterBlock(id) => {
+                    scopes.push(*id);
+                    let operands = self.usage_tracker.get_initializations(*id);
+                    self.register_state.reserve_variables(operands.size_hint().0);
+                    for operand_id in operands {
+                        let final_usage = self.usage_tracker.final_usage(*operand_id);
+                        let invalid_soon = self.operations[(index + 1)..final_usage].iter()
+                            .filter_map(|op| op.operation())
+                            .fold(0, |map, operation|
+                                map | self.invalidation(operation));
+                        let operand = &mut self.operands[*operand_id];
+                        self.register_state.allocate_variable(*operand_id, operand, invalid_soon);
+                    }
+                    self.register_state.enter_block(&self.operands);
                 },
                 OperationUnit::LeaveBlock => {
-                    println!("{}: LeaveBlock", index);
+                    self.register_state.leave_block(&self.operands);
+                    scopes.pop();
+                },
+                OperationUnit::Operation(operation) => {
+                    let scope = *scopes.last().unwrap();
+                    let mut invalid_now =  self.invalidation(operation);
+                    let mut invalid_soon = self.invalid_soon(index, scope, operation);
+                    let mut bitmap = 1;
+                    let destroyed = operation.operator.destroyed();
+                    println!("\n{:?} : index {}", operation.operator, index);
+                    for (i, id) in operation.operands.iter_mut().enumerate() {
+                        bitmap = operation.operator.next_bitmap(
+                            bitmap, i, self.operands[*id].size
+                        );
+
+                        if self.register_state.is_free(&self.operands[*id]) {
+                            self.register_state.allocate(*operand, bitmap & MEM_GEN_REG, invalid_now, invalid_soon);
+                        }
+                        let mut allocation_bitmap = self.register_state.allocation_bitmap(&self.operands[*id]);
+                        debug_assert!(allocation_bitmap & bitmap != 0);
+
+                        let used_after = self.usage_tracker.used_after(*id, index);
+                        // If this operand is a reused variable and would be destroyed, a copy needs to be made
+                        if used_after == UsedAfter::ValueNeeded && destroyed & (1 << i) != 0 {
+                            let new = self.create_operand(self.operands[*id].size);
+                            let location = self.register_state.allocate(
+                                &self.operands[new],
+                                bitmap & MEM_GEN_REG, invalid_now, invalid_soon);
+                            // Allocating might take the previous register and move the original value
+                            // In that case no move is needed.
+                            if location != allocation_bitmap {
+                                println!("Mov0 {}, {}", self.register_state.to_string(new.allocation.get()), self.register_state.to_string(operand.allocation.get()));
+                                self.register_state.build_instruction(
+                                    OperationType::Mov,
+                                    &[&self.operands[new], &self.operands[*id]]);
+                            }
+                            allocation_bitmap = location;
+                            *id = new;
+                        }
+                        if destroyed & (1 << i) != 0 {
+                            used_stable |= allocation_bitmap & NON_VOL_GEN_REG
+                        }
+                        // Only the first operand uses invalid_soon, since that is the destination register
+                        invalid_soon = 0;
+                        // If this operand is going to be freed there is no need to invalidate it.
+                        // It cannot be freed until after invalidation is done since otherwise
+                        //  they might be overridden while saving needed invalidated registers.
+                        if used_after != UsedAfter::ValueNeeded {
+                            invalid_now &= !allocation_bitmap;
+                        }
+                        bitmap = allocation_bitmap;
+                    }
+                    self.register_state.invalidate_registers(invalid_now);
+
+                    print!("{:?}", operation.operator);
+                    for o in &operation.operands {
+                        let operand = &self.operands[*o];
+                        print!(" {}", self.register_state.to_string(operand.allocation.get()));
+                    }
+                    println!();
+                    self.register_state.build_instruction(operation.operator, &operation.operands);
+
+                    if let Some(dest) = operation.dest {
+                        let usage = *self.usages.get_mut(&dest.id).unwrap().front().unwrap();
+                        let first = *operation.operands.first().unwrap();
+                        first.merge_into(dest);
+                        match usage {
+                            Usage::Use => {
+                                debug_assert!(self.register_state.is_free(dest));
+                                self.usages.insert(first.id, self.usages[&dest.id].clone());
+                            },
+                            Usage::Restore => {
+                                let dest_usages = self.usages.get_mut(&dest.id).unwrap();
+                                dest_usages.pop_front().unwrap();
+                                let clone = dest_usages.clone();
+                                dest_usages.pop_front().unwrap();
+                                self.usages.insert(first.id, clone);
+                            },
+                            Usage::Free | Usage::TempFree => panic!("Unused dest")
+                        }
+                    }
+                    for &operand in &operation.operands {
+                        let usage = self.usages.get_mut(&operand.id).unwrap().pop_front().unwrap();
+                        if usage != Usage::Use {
+                            self.register_state.free(operand);
+                        }
+                    }
+
                 }
             }
         }
-        /*for (index, operation) in self.operations.iter().enumerate() {
-            match operation {
-                OperationUnit::EnterBlock(id) => {
-                    for operand_id in self.usage_tracker.get_initializations(*id) {
-                        self.register_state.allocate_variable(&self.operands[operand_id]);
-                    }
-                }
-            }
-        }*/
         /*
         let mut home_locations = Vec::new();
         self.allocate_hints(&mut home_locations);
