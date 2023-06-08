@@ -3,7 +3,7 @@ use std::slice::Iter;
 use crate::language::amd_win64::compiler::OperationUnit;
 use crate::language::amd_win64::operation::Operand;
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 struct Scope {
     id : usize,
     first_id : usize
@@ -14,6 +14,7 @@ struct UsageNode {
     scope : Scope
 }
 
+#[derive(PartialEq, Debug)]
 pub enum UsedAfter {
     ValueNeeded, LocationNeeded, None
 }
@@ -24,7 +25,7 @@ pub struct UsageTracker {
     usage_queue : HashMap<usize, Vec<UsageNode>>,
     // <first_scope_id, Vec<(scope-id, scope-row)>>
     scopes : HashMap<usize, Vec<(usize, usize)>>,
-    // <(operand-id, row), (scope-id, first_scope-id)>
+    // <(operand-id, row)
     free_usages : HashMap<(usize, usize), Scope>,
     final_usages  : HashSet<(usize, usize)>,
     // <scope-id, Vec<operand-id>
@@ -62,6 +63,7 @@ impl UsageTracker {
         let scope_id = *self.scope_ids.last().unwrap();
         let first_scope_id = *self.first_scope_ids.last().unwrap();
         if let Some(nodes) = self.usage_queue.get_mut(&id) {
+
             let in_same_block = first_scope_id == nodes.first().unwrap().scope.first_id;
             if !in_same_block {
                 if !value_needed {

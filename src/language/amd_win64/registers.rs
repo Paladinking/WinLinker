@@ -43,6 +43,24 @@ pub const NON_VOL_GEN_REG : u64 = RBX | RBP | RDI | RSI | R12 | R13 | R14 | R15;
 pub const GEN_REG : u64 = VOL_GEN_REG | NON_VOL_GEN_REG;
 pub const MEM_GEN_REG : u64 = GEN_REG | MEM;
 
+pub mod encoding {
+    pub const RAX : u8 = 0b0000;
+    pub const RCX : u8 = 0b0001;
+    pub const RDX : u8 = 0b0010;
+    pub const RBX : u8 = 0b0011;
+    pub const RBP : u8 = 0b0101;
+    pub const RSI : u8 = 0b0110;
+    pub const RDI : u8 = 0b0111;
+    pub const R8 : u8 = 0b1000;
+    pub const R9 : u8 = 0b1001;
+    pub const R10 : u8 = 0b1010;
+    pub const R11 : u8 = 0b1011;
+    pub const R12 : u8 = 0b1100;
+    pub const R13 : u8 = 0b1101;
+    pub const R14 : u8 = 0b1110;
+    pub const R15 : u8 = 0b1111;
+}
+
 // Represents a single register during allocation.
 struct Register {
     // The bitmap matching this register
@@ -66,7 +84,7 @@ pub struct RegisterState {
     free_gen : u64, // Bitmap of all free general purpose registers
     variables : Vec<(usize, MemoryAllocation)>,
     variable_map : u64, // Bitmap of all variables in registers
-    saved_variables : Vec<HashMap<usize, MemoryAllocation>>,
+    saved_variables : Vec<HashMap<usize, (MemoryAllocation, bool)>>,
     pub output : Vec<Instruction>
 }
 
@@ -78,6 +96,17 @@ pub fn register_string(bitmap : u64) -> &'static str {
         RDI => "rdi", RSI => "rsi", R12 => "r12",
         R13 => "r13", R14 => "r14", R15 => "r15",
         _ => "???"
+    }
+}
+
+pub fn register_bitmap(encoding : u8) -> u64 {
+    match encoding {
+        encoding::RAX => RAX, encoding::RCX => RCX, encoding::RDX => RDX,
+        encoding::RBX => RBX, encoding::RBP => RBP, encoding::RSI => RSI,
+        encoding::RDI => RDI, encoding::R8 => R8, encoding::R9 => R9,
+        encoding::R10 => R10, encoding::R11 => R11, encoding::R12 => R12,
+        encoding::R13 => R13, encoding::R14 => R14, encoding::R15 => R15,
+        _ => panic!("Invalid encoding")
     }
 }
 
@@ -111,27 +140,35 @@ impl MemoryAllocation {
             MemoryAllocation::None => panic!("Size on non allocation")
         }
     }
+
+    fn is_free(&self) -> bool {
+        match &self {
+            MemoryAllocation::Register(..) | MemoryAllocation::Memory(..) |
+            MemoryAllocation::Immediate(..) | MemoryAllocation::Address(..) => false,
+            MemoryAllocation::None => true
+        }
+    }
 }
 
 impl RegisterState {
 
     pub fn new() -> RegisterState {
         let registers = vec![
-            Register::new_general(RCX, 0b0001),
-            Register::new_general(RDX, 0b0010),
-            Register::new_general(RAX, 0b0000),
-            Register::new_general(R8, 0b1000),
-            Register::new_general(R9, 0b1001),
-            Register::new_general(R10, 0b1010),
-            Register::new_general(R11, 0b1011),
-            Register::new_general(RBX, 0b0011),
-            Register::new_general(RBP, 0b0101),
-            Register::new_general(RDI, 0b0111),
-            Register::new_general(RSI, 0b0110),
-            Register::new_general(R12, 0b1100),
-            Register::new_general(R13, 0b1101),
-            Register::new_general(R14, 0b1110),
-            Register::new_general(R15, 0b1111)
+            Register::new_general(RCX, encoding::RCX),
+            Register::new_general(RDX, encoding::RDX),
+            Register::new_general(RAX, encoding::RAX),
+            Register::new_general(R8, encoding::R8),
+            Register::new_general(R9, encoding::R9),
+            Register::new_general(R10, encoding::R10),
+            Register::new_general(R11, encoding::R11),
+            Register::new_general(RBX, encoding::RBX),
+            Register::new_general(RBP, encoding::RBP),
+            Register::new_general(RDI, encoding::RDI),
+            Register::new_general(RSI, encoding::RSI),
+            Register::new_general(R12, encoding::R12),
+            Register::new_general(R13, encoding::R13),
+            Register::new_general(R14, encoding::R14),
+            Register::new_general(R15, encoding::R15)
         ];
         // All operands have a 0-initialized id field, make sure this means no allocation.
         let allocations = vec![MemoryAllocation::None];
@@ -194,14 +231,19 @@ impl RegisterState {
         }
     }
 
+    fn add_instruction(&mut self, operation : OperationType, size : OperandSize, operands : Vec<InstructionOperand>) {
+        let instruction = Instruction::new(operation, size, operands);
+        println!("{:?}", instruction);
+        self.output.push(instruction);
+    }
+
     pub fn build_instruction(&mut self, operation : OperationType, operands : &[&Operand]) {
         let size = operands[0].size;
         // Need to collect to avoid borrowing self, probably fix.
         let vals : Vec<_> = operands.iter().map(|o|
             self.get_val(o.allocation.get())
         ).collect();
-        self.output.push(Instruction::new(operation, size, vals));
-
+        self.add_instruction(operation, size, vals);
     }
 
     // Allocates a location for operand to a location contained in bitmap.
@@ -253,8 +295,7 @@ impl RegisterState {
 
         let bitmap = allocate_reg(self, location, operand);
         let vals = vec![self.get_val(prev_owner), self.get_val(operand.allocation.get())];
-        println!("Mov3 {}, {}", self.to_string(prev_owner), self.to_string(operand.allocation.get()));
-        self.output.push(Instruction::new(OperationType::Mov, operand.size, vals));
+        self.add_instruction(OperationType::Mov, operand.size, vals);
         return bitmap;
     }
 
@@ -281,51 +322,6 @@ impl RegisterState {
         self.allocations[operand.allocation.get()] = MemoryAllocation::None;
     }
 
-    /*pub fn set_home(&mut self, operand : &Operand) {
-        let allocation = self.allocation_bitmap(operand);
-        self.home_gen &= !allocation;
-        self.home_locations.insert(operand.id, self.allocations[operand.allocation.get()]);
-    }
-
-    pub fn push_state(&mut self, operands : &Vec<&Operand>) {
-        for operand in operands {
-            self.restore_allocation(operand);
-        }
-    }
-
-    pub fn pop_state(&mut self) {
-
-    }
-
-    pub fn restore_allocation(&mut self, operand: &Operand) {
-        if self.is_free(operand) {
-            return;
-        }
-        let home = self.home_locations.get(&operand.id).unwrap();
-        let index = operand.allocation.get();
-        let prev = self.allocations[index];
-        if home != &prev {
-            let val = self.get_val(index);
-            let s = self.to_string(index);
-            self.allocations[index] = *home;
-            println!("Move4 {}, {}", self.to_string(index), s);
-            self.output.push(Instruction::new(OperationType::Mov, home.size(), vec![self.get_val(index), val]));
-            match self.allocations[index] {
-                MemoryAllocation::Register(index, _) => {
-                    debug_assert!(self.registers[index].operand.is_none());
-                    self.registers[index].operand.replace(operand.allocation.get());
-                }
-                MemoryAllocation::Memory(index, size) => {
-                    debug_assert!(self.memory[index..(index + size as usize)].iter().all(|b| !*b));
-                    self.memory[index..(index + size as usize)].fill(true);
-                }
-                MemoryAllocation::Immediate(_, _) | MemoryAllocation::Address(_) |
-                MemoryAllocation::Hint(_) | MemoryAllocation::None => panic!("Not valid home location")
-            }
-        }
-
-    }*/
-
     // Move all allocations that are contained in map to some register not in map.
     pub fn invalidate_registers(&mut self, map : u64) {
         if map == 0 {
@@ -334,7 +330,6 @@ impl RegisterState {
         for i in 0..self.registers.len() {
             if self.registers[i].bitmap & map != 0 {
                 if let Some(index) = self.registers[i].operand {
-                    let s = self.to_string(index);
                     let val = self.get_val(index);
                     let size = self.allocations[index].size();
                     // Try to find free register, if none exists use memory
@@ -346,8 +341,8 @@ impl RegisterState {
                         let mem = self.get_memory(size);
                         self.allocations[index] = MemoryAllocation::Memory(mem, size);
                     }
-                    println!("Move3 {}, {}", self.to_string(index), s);
-                    self.output.push(Instruction::new(OperationType::Mov, size, vec![self.get_val(index), val]));
+                    self.add_instruction(OperationType::Mov, size,
+                                         vec![self.get_val(index), val]);
                     self.registers[i].operand = None;
                     self.free_gen |= self.registers[i].bitmap;
                 }
@@ -356,11 +351,7 @@ impl RegisterState {
     }
 
     pub fn is_free(&self, operand : &Operand) -> bool {
-        match self.allocations[operand.allocation.get()] {
-            MemoryAllocation::Register(_, _) | MemoryAllocation::Memory(_, _) |
-            MemoryAllocation::Immediate(_, _) | MemoryAllocation::Address(_)=> false,
-            MemoryAllocation::None => true
-        }
+        self.allocations[operand.allocation.get()].is_free()
     }
 
     pub fn allocation_bitmap(&self, operand : &Operand) -> u64 {
@@ -375,10 +366,10 @@ impl RegisterState {
         }
     }
 
-    pub fn to_string(&self, id : usize) -> String {
-        match self.allocations[id] {
+    fn allocation_string(&self, allocation : &MemoryAllocation) -> String {
+        match allocation {
             MemoryAllocation::Register(i, _) => {
-                register_string(self.registers[i].bitmap).to_owned()
+                register_string(self.registers[*i].bitmap).to_owned()
             }
             MemoryAllocation::Memory(i, _) => {
                 "mem(".to_owned() + &i.to_string() + ")"
@@ -422,7 +413,7 @@ impl RegisterState {
             if let Some(location) = Self::get_register(self.free_gen & !self.variable_map & bitmap) {
                 let allocation = MemoryAllocation::Register(location, operand.size);
                 self.variable_map |= self.registers[location].bitmap;
-                self.saved_variables.last_mut().unwrap().insert(id, allocation);
+                self.saved_variables.last_mut().unwrap().insert(id, (allocation, true));
                 if operand.hint & self.registers[location].bitmap != 0 {
                     operand.hint &= self.registers[location].bitmap;
                 }
@@ -432,35 +423,34 @@ impl RegisterState {
         let index = self.get_memory(operand.size);
         operand.home.replace(index);
         self.saved_variables.last_mut().unwrap().insert(
-            id, MemoryAllocation::Memory(index, operand.size));
+            id, (MemoryAllocation::Memory(index, operand.size), true));
     }
 
     // Call after allocate_variables when entering block
     pub fn enter_block(&mut self, operands : &Vec<Operand>) {
         let size = self.variables.len();
-        for (id, all) in self.saved_variables.last().unwrap() {
-            self.variables.push((*id, all.clone()));
+        for (id, (allocation, _ )) in self.saved_variables.last().unwrap() {
+            self.variables.push((*id, allocation.clone()));
         }
-        for (id, all) in &self.variables[0..size] {
+        for (id, allocation) in &self.variables[0..size] {
             if !self.is_free(&operands[*id]) {
                 self.saved_variables.last_mut().unwrap().insert(
-                    *id, self.allocations[operands[*id].allocation.get()].clone()
+                    *id, (self.allocations[operands[*id].allocation.get()].clone(), false)
                 );
             } else {
                 self.saved_variables.last_mut().unwrap().insert(
-                    *id, all.clone()
+                    *id, (allocation.clone(), true)
                 );
             }
         }
     }
 
-    pub fn leave_block(&mut self, operands : &Vec<Operand>) {
+    pub fn leave_block(&mut self, operands : &Vec<Operand>, has_next : bool) {
         let to_restore = self.saved_variables.pop().unwrap();
-        for (id, allocation) in to_restore {
+        for (&id, (allocation, _ )) in &to_restore {
             let cur_allocation = operands[id].allocation.get();
-            if !self.is_free(&operands[id]) && self.allocations[cur_allocation].ne(&allocation) {
+            if !self.is_free(&operands[id]) && self.allocations[cur_allocation].ne(allocation) {
                 let val = self.get_val(cur_allocation);
-                let s = self.to_string(cur_allocation);
                 match &allocation {
                     MemoryAllocation::Register(index, size) => {
                         if let Some(all) = self.registers[*index].operand {
@@ -474,32 +464,49 @@ impl RegisterState {
                                 self.allocations[all] = MemoryAllocation::Memory(mem, scratch_size);
                             };
                             let scratch = self.get_val(all);
-                            self.output.push(Instruction::new(
-                                OperationType::Mov, scratch_size,
-                                vec![scratch, target.clone()]));
-                            self.output.push(Instruction::new(
-                                OperationType::Mov, *size, vec![target, val]));
+                            self.add_instruction(OperationType::Mov, scratch_size,
+                                vec![scratch, target.clone()]);
+                            self.add_instruction(OperationType::Mov, *size,
+                                                 vec![target, val]);
                             self.free_allocation(cur_allocation, true);
-                            self.allocations[cur_allocation] = allocation;
+                            self.allocations[cur_allocation] = allocation.clone();
                         } else {
                             self.free_allocation(cur_allocation, true);
                             self.allocations[cur_allocation] = allocation.clone();
                             self.registers[*index].operand.replace(cur_allocation);
-                            println!("Move4 {}, {}", self.to_string(cur_allocation), s);
-                            self.output.push(Instruction::new(
+                            self.add_instruction(
                                 OperationType::Mov,
-                                *size, vec![self.get_val(cur_allocation), val]));
+                                *size, vec![self.get_val(cur_allocation), val]);
                         }
                     }
                     MemoryAllocation::Memory(_, size) => {
+                        debug_assert!(
+                            if let MemoryAllocation::Register(..) = self.allocations[cur_allocation] {
+                                true
+                            } else {
+                                false
+                            }
+                        );
                         self.free_allocation(cur_allocation, true);
                         self.allocations[cur_allocation] = allocation.clone();
-                        println!("Move4 {}, {}", self.to_string(cur_allocation), s);
-                        self.output.push(Instruction::new(
-                            OperationType::Mov,
-                            *size, vec![self.get_val(cur_allocation), val]));
+                        self.add_instruction(OperationType::Mov,
+                            *size, vec![self.get_val(cur_allocation), val]);
                     }
                     _ => panic!("Invalid location")
+                }
+            }
+        }
+        if !has_next {return;}
+        for (&id, &(ref allocation, is_free)) in &to_restore {
+            let index = operands[id].allocation.get();
+            if is_free {
+                if !self.allocations[index].is_free() {
+                    self.free_allocation(index, false);
+                }
+            } else {
+                self.allocations[index] = allocation.clone();
+                if let MemoryAllocation::Register(reg, _) = &self.allocations[index] {
+                    self.registers[*reg].operand.replace(index);
                 }
             }
         }

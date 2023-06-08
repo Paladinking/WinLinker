@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::fmt::{Debug, Formatter, Write};
 use std::hash::Hash;
 use derivative::Derivative;
 use crate::language::amd_win64::compiler::AddressRelocation;
 use crate::language::amd_win64::operation::{OperationType, OperandSize};
+use crate::language::amd_win64::registers::{register_bitmap, register_string};
 
 #[derive(Clone, Copy)]
 enum Mnemonic {
@@ -35,7 +37,7 @@ enum OperandType {
     Reg = 0, Mem = 1, Imm = 2, Addr = 3
 }
 
-#[derive(Derivative, Eq, Debug, Clone)]
+#[derive(Derivative, Eq, Clone)]
 #[derivative(PartialEq, Hash)]
 pub enum InstructionOperand {
     Reg(
@@ -56,13 +58,40 @@ pub enum InstructionOperand {
     )
 }
 
+impl Debug for InstructionOperand {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match &self {
+            InstructionOperand::Reg(r) => {
+                f.write_fmt(
+                    format_args!("{}", register_string(register_bitmap(*r))))
+            },
+            InstructionOperand::Mem(index) => f.write_fmt(format_args!("[{}]", index)),
+            InstructionOperand::Imm(im) => f.write_fmt(format_args!("Im({})", im)),
+            InstructionOperand::Addr(addr) => f.write_fmt(format_args!("Addr({})", addr))
+        }
+    }
+}
+
 // An instruction contains everything about an instruction needed to compile it into machine code
 //  (except exact memory offsets). They can hash based on
-#[derive(PartialEq, Hash, Eq, Debug)]
+#[derive(PartialEq, Hash, Eq)]
 pub struct Instruction {
     operation : OperationType,
     size : OperandSize,
     operands : Vec<InstructionOperand>,
+}
+
+impl Debug for Instruction {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if self.operands.len() == 0 {
+            return f.write_fmt(format_args!("{:?} {:?}", self.size, self.operation));
+        }
+        f.write_fmt(format_args!("{:?} {:?} ", self.size, self.operation))?;
+        for operand in &self.operands[0..(self.operands.len() - 1)] {
+            f.write_fmt(format_args!("{:?}, ", operand))?;
+        }
+        return f.write_fmt(format_args!("{:?}", self.operands[self.operands.len() - 1]));
+    }
 }
 
 impl Instruction {
