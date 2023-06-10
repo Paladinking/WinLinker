@@ -44,9 +44,11 @@ struct IfBlockBuilder<'a> {
 
 impl <'a> IfBlockBuilder<'a> {
     fn new(builder : &mut InstructionBuilder, statements : &'a Vec<IfStatement>) -> Self {
+        let mut block_ids : Vec<_> = statements.iter().map(|_| 0).collect();
+        block_ids[0] = builder.block_tracker.get_id();
         IfBlockBuilder {
             statements,
-            block_ids : statements.iter().map(|_| builder.tracker.get_id()).collect(),
+            block_ids,
             label_queue : Vec::new(),
             label_locations : vec![None; (statements.len() * 2) + 1], // All conditions start and end + after all blocks
             index : 0
@@ -162,6 +164,7 @@ impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
         builder.usage_tracker.leave_scope();
         self.index += 1;
         if let Some(s) = self.statements.get(self.index) {
+            self.block_ids[self.index] = builder.block_tracker.get_id();
             // Add jump to end of scope
             let jmp_dest = builder.create_operand(OperandSize::QWORD);
             self.label_queue.push((jmp_dest, self.statements.len() * 2));
@@ -171,7 +174,9 @@ impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
             self.add_condition(builder);
             self.label_locations[self.index * 2 + 1].replace(builder.operations.len() + 1); // + 1 to skip EnterBlock
             builder.usage_tracker.enter_scope(self.block_ids[0], builder.operations.len());
-            builder.usage_tracker.alt_scope(self.block_ids[self.index], builder.operations.len());
+            builder.usage_tracker.alt_scope(
+                self.block_ids[self.index], builder.operations.len(),
+                self.statements[self.index].condition.is_some());
             builder.operations.push(OperationUnit::EnterBlock(self.block_ids[self.index]));
             Some(s.block.iter())
         } else {
@@ -200,14 +205,14 @@ pub struct InstructionBuilder <'a> {
     variable_count : usize,
     arena : &'a Bump,
     register_state : RegisterState,
-    tracker : IdTracker,
+    block_tracker : IdTracker,
     exit_code : usize
 }
 
 impl <'a> InstructionBuilder <'a> {
     pub fn new<'b> (arena : &'a Bump, vars: &'b HashMap<String, Rc<Variable>>) -> InstructionBuilder<'a> {
         let register_state = RegisterState::new();
-        let mut tracker = IdTracker::new();
+        let mut block_tracker = IdTracker::new();
         let operands = vars.iter().enumerate().map(|(i, (_, v))|{
             v.id.replace(Some(i));
             Operand::new(OperandSize::from(v.var_type))
@@ -215,7 +220,7 @@ impl <'a> InstructionBuilder <'a> {
         let exit_code = vars.get("exit_code").unwrap().id.get().unwrap();
         let mut builder = InstructionBuilder {
             operations: Vec::new(), usage_tracker : UsageTracker::new(),
-            operands, arena, register_state, tracker, exit_code, variable_count : vars.len()
+            operands, arena, register_state, block_tracker, exit_code, variable_count : vars.len()
         };
         builder
     }
@@ -350,7 +355,7 @@ impl <'a> InstructionBuilder <'a> {
     pub fn with(mut self, statements : &'a Vec<StatementData>) -> Self {
         let mut statement_stack = vec![statements.iter()];
         let mut builder_stack = Vec::new();
-        let outer_scope_id = self.tracker.get_id();
+        let outer_scope_id = self.block_tracker.get_id();
         self.operations.push(OperationUnit::EnterBlock(outer_scope_id));
         self.usage_tracker.enter_scope(outer_scope_id, self.operations.len());
         while let Some(iter) = statement_stack.last_mut() {
@@ -400,7 +405,7 @@ impl <'a> InstructionBuilder <'a> {
             });
 
         self.usage_tracker.leave_scope();
-        self.usage_tracker.finalize(self.variable_count);
+        self.usage_tracker.finalize(&self.operations, self.variable_count);
         self
     }
 
