@@ -34,14 +34,15 @@ impl Scope {
 }
 
 struct UsageNode {
-    row : usize,
-    scope : usize,
-    value_needed : bool,
+    parents : Vec<usize>,
+    children : Vec<usize>,
+    // operand-id, (row, value_needed)
+    usages : HashMap<usize, (usize, bool)>
 }
 
 impl UsageNode {
-    fn new(row : usize, scope : usize, value_needed : bool) -> UsageNode {
-        UsageNode {row, scope, value_needed}
+    fn new() -> UsageNode {
+        UsageNode {parents : Vec::new(), children : Vec::new(), usages : HashMap::new()}
     }
 }
 
@@ -57,7 +58,8 @@ pub struct UsageTracker {
     // <first_scope_id, Vec<(scope-id, scope-row)>>
     scope_blocks : HashMap<usize, ScopeBlock>,
     scopes : HashMap<usize, Scope>,
-    usages : HashMap<(usize, usize), bool>,
+    nodes : Vec<UsageNode>
+    frees : HashSet<(usize, usize)>,
     // <(operand-id, row)
     used_operands : HashMap<usize, usize>,
     // <scope-id, Vec<operand-id>
@@ -68,8 +70,8 @@ pub struct UsageTracker {
 impl UsageTracker {
     pub fn new() -> UsageTracker {
         UsageTracker {
-            scope_ids : Vec::new(), first_scope_ids : Vec::new(),
-            usages : HashMap::new(), scopes : HashMap::new(), scope_blocks : HashMap::new(),
+            scope_ids : Vec::new(), first_scope_ids : Vec::new(), frees : HashSet::new(),
+            nodes : Vec::new(), scopes : HashMap::new(), scope_blocks : HashMap::new(),
             initialized_operands : HashMap::new(), used_operands : HashMap::new(), outer_scope : 0
         }
     }
@@ -81,6 +83,12 @@ impl UsageTracker {
             Scope::new(scope_id, scope_row, scope_id, self.scope_ids.clone()));
         self.scope_blocks.entry(scope_id).or_insert_with(||
             ScopeBlock::new(vec![scope_id]));
+        if let Some(node) = self.nodes.last_mut() {
+            node.children.push(self.nodes.len());
+        }
+        self.nodes.push(UsageNode::new());
+
+
     }
 
     pub fn leave_scope(&mut self) {
@@ -202,22 +210,22 @@ impl UsageTracker {
         debug_assert!(self.first_scope_ids.is_empty());
         let mut scopes = Vec::with_capacity(self.scope_ids.capacity());
         for (index, operation) in operations.iter().enumerate() {
-
             match operation {
                 OperationUnit::Operation(operation) => {
-                    println!("{:?}", operation);
                     if let Some(dest) = operation.dest {
                         if dest < variable_count {
-                            let value_needed = self.value_needed(
-                                dest, scopes.clone(), operations, index + 1);
-                            println!("Value needed(dest {}) : {}", index, value_needed);
+                            if !self.value_needed(dest, scopes.clone(), operations, index + 1) {
+                                self.frees.insert((dest, index));
+                            }
                         }
                     }
-                    for (i, operand) in operation.operands.iter().enumerate() {
+                    for &operand in &operation.operands {
                         if *operand < variable_count {
-                            let value_needed = self.value_needed(
-                                *operand, scopes.clone(), operations, index + 1);
-                            println!("Value needed({}, {}) : {}", index, *operand, value_needed);
+                            if !self.value_needed(operand, scopes.clone(), operations, index + 1) {
+                                self.frees.insert((operand, index));
+                            }
+                        } else {
+                            self.frees.insert((operand, index));
                         }
                     }
                 }
