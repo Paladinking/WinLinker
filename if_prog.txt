@@ -1,11 +1,12 @@
 u32 a;
 u32 b;
 start {
-    a = 11 * 12;
-    b = a + a;
+    a = 5;
+    b = 11 * 12;
+    a = a * a;
     if 2 == 1 {
         a = 20;
-    } else if b == 2 && a == 1 {
+    } else if b == 2 && b == 1 {
         a = 11;
         b = 23;
     } else {
@@ -13,17 +14,13 @@ start {
         if 1 == 1 {
             a = 1;
         } else {
-            a = b;
+
         }
     }
     exit_code = a + b;
 } end
-// 2 bugs?
-//  Variable 'a' is (marked as) temp_freed after 'if a == 1'
-//  Weird scope correction after exiting first if branch
-//FUCK
-//Usage_tracker does not work at all...
-                                          |
+
+
 
 u32 a;
 u32 b;

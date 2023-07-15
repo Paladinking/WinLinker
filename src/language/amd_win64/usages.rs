@@ -22,15 +22,12 @@ struct Scope {
     block_id : usize,
     row : usize,
     last_child : usize,
-    initialized_variables : Vec<usize>,
-    freed_variables : HashSet<usize>,
-    path : Vec<usize>
+    freed_variables : Vec<usize>
 }
 
 impl Scope {
     fn new(block_id : usize, row : usize,  last_child : usize, path : Vec<usize>) -> Scope {
-        Scope {block_id, row, last_child,
-            initialized_variables : Vec::new(), freed_variables : HashSet::new(), path}
+        Scope {block_id, row, last_child, freed_variables : Vec::new()}
     }
 }
 
@@ -263,6 +260,12 @@ impl UsageTracker {
                 }
                 OperationUnit::EnterBlock(scope) => {
                     scopes.push(*scope);
+                    for operand in 0..variable_count {
+                        let status = self.analyze_usage(operand, scopes.clone(), operations, index + 1);
+                        if !status.value_needed {
+                            self.scopes.get_mut(scope).unwrap().freed_variables.push(operand);
+                        }
+                    }
                 }
                 OperationUnit::LeaveBlock(_) => {
                     scopes.pop().unwrap();
@@ -278,6 +281,11 @@ impl UsageTracker {
         }
         return [].iter();
     }
+
+    pub fn get_frees(&self, scope_id : usize) -> impl Iterator<Item=&usize> {
+        return self.scopes.get(&scope_id).unwrap().freed_variables.iter();
+    }
+
 
     pub fn used_after(&self, id : usize, row : usize) -> UsedAfter {
         if let Some(usage) = self.usages.get(&(id, row)) {

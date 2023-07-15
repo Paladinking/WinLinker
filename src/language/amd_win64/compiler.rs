@@ -156,10 +156,10 @@ impl <'a> IfBlockBuilder<'a> {
 
 impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
     fn begin<'b>(&'b mut self, builder : &mut InstructionBuilder<'a>) -> std::slice::Iter<'a, StatementData> {
-        self.label_locations[0] = Some(builder.operations.len() + 1); // + 1 to skip Sync
+        self.label_locations[0] = Some(builder.operations.len());
         builder.operations.push(OperationUnit::SyncPush(self.block_ids[0]));
         self.add_condition(builder);
-        self.label_locations[1] = Some(builder.operations.len() + 1); // + 1 to skip EnterBlock
+        self.label_locations[1] = Some(builder.operations.len());
         builder.usage_tracker.enter_scope(self.block_ids[0], builder.operations.len());
         builder.operations.push(OperationUnit::EnterBlock(self.block_ids[0]));
 
@@ -177,10 +177,10 @@ impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
             self.label_queue.push((jmp_dest, self.statements.len() * 2));
             builder.add_operation(OperationType::Jmp, vec![jmp_dest], None);
 
-            self.label_locations[self.index * 2].replace(builder.operations.len() + 1); // + 1 to skip Sync
+            self.label_locations[self.index * 2].replace(builder.operations.len());
             builder.operations.push(OperationUnit::SyncLoad);
             self.add_condition(builder);
-            self.label_locations[self.index * 2 + 1].replace(builder.operations.len() + 1); // + 1 to skip EnterBlock
+            self.label_locations[self.index * 2 + 1].replace(builder.operations.len());
             builder.usage_tracker.enter_scope(self.block_ids[0], builder.operations.len());
             builder.usage_tracker.alt_scope(
                 self.block_ids[self.index], builder.operations.len(),
@@ -188,12 +188,12 @@ impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
             builder.operations.push(OperationUnit::EnterBlock(self.block_ids[self.index]));
             Some(s.block.iter())
         } else {
+            self.label_locations[self.statements.len() * 2].replace(builder.operations.len());
             if self.statements.last().unwrap().condition.is_some() {
                 // Sync only needed if program execution might not enter any case of if-statement.
                 builder.operations.push(OperationUnit::SyncLoad);
             }
             builder.operations.push(OperationUnit::SyncPop);
-            self.label_locations[self.statements.len() * 2].replace(builder.operations.len());
             for &(o, index) in &self.label_queue {
                 let addr = self.label_locations[index].unwrap();
                 builder.register_state.allocate_addr(&builder.operands[o], addr);
@@ -440,21 +440,27 @@ impl <'a> InstructionBuilder <'a> {
         let mut used_stable = 0_u64;
 
         for (index) in 0..self.operations.len() {
-            print!("{} : ", index);
+            print!(" {} : ", index);
             operation_index_list.push(self.register_state.output.len());
             match std::mem::replace(&mut self.operations[index], OperationUnit::EnterBlock(0)) {
                 OperationUnit::EnterBlock(ref id) => {
-                    println!("Enter");
+                    print!("enter ");
                     scopes.push(*id);
                     self.register_state.enter_block(&self.operands);
+                    let to_free = self.usage_tracker.get_frees(*id);
+                    for &operand in to_free {
+                        if !self.register_state.is_free(&self.operands[operand]) {
+                            self.register_state.free(&self.operands[operand]);
+                        }
+                    }
                 },
                 OperationUnit::LeaveBlock(has_next) => {
-                    println!("Leave");
+                    print!("leave ");
                     self.register_state.leave_block(&self.operands, has_next);
                     scopes.pop();
                 },
                 OperationUnit::SyncPush(scope) => {
-                    println!("SyncPush");
+                    print!("syncPush ");
                     let operands = self.usage_tracker.get_initializations(scope);
                     self.register_state.reserve_variables(operands.size_hint().0);
                     for operand_id in operands {
@@ -465,15 +471,15 @@ impl <'a> InstructionBuilder <'a> {
                     self.register_state.push_state(&self.operands);
                 }
                 OperationUnit::SyncLoad => {
-                    println!("SyncLoad");
+                    print!("syncLoad ");
                     self.register_state.load_state(&self.operands);
                 },
                 OperationUnit::SyncPop => {
-                    println!("SyncPop");
+                    print!("syncPop ");
                   self.register_state.pop_state();
                 },
                 OperationUnit::Operation(mut operation) => {
-                    println!("Op");
+                    print!("op ");
                     let scope = *scopes.last().unwrap();
                     let mut invalid_now =  operation.invalidations;
                     let mut invalid_soon = self.usage_tracker.row_invalidations(index);
@@ -556,11 +562,10 @@ impl <'a> InstructionBuilder <'a> {
                             }
                         }
                     }
-
                 }
             }
         }
-        /*
+
         let compiler = InstructionCompiler::new();
         let mut res = Vec::new();
         let mut address_list = Vec::with_capacity(self.register_state.output.len());
@@ -607,6 +612,6 @@ impl <'a> InstructionBuilder <'a> {
 
         std::fs::write("out.bin", &res).unwrap();
 
-        println!();*/
+        println!();
     }
 }
