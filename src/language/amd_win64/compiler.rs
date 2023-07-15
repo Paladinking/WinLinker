@@ -18,7 +18,8 @@ use crate::language::types::Type;
 pub enum OperationUnit {
     Operation(Operation), // Real operation
     EnterBlock(usize),
-    LeaveBlock(bool)
+    LeaveBlock(bool),
+    Sync
 }
 
 impl OperationUnit {
@@ -68,8 +69,10 @@ impl <'a> IfBlockBuilder<'a> {
     }
 
     fn add_condition<'b>(&'b mut self, builder : &mut InstructionBuilder<'a>) {
+        builder.operations.push(OperationUnit::Sync);
         let expr = if let Some(e) = &self.statements[self.index].condition { e } else { return; };
         let mut location_offset = self.label_locations.len();
+        // Extend label_locations with jumps within expression
         self.label_locations.resize(location_offset + expr.len(), None);
         let mut stack = vec![(expr.len() - 1, None, Some(self.else_location()), self.block_location())];
         while let Some((index, true_location, false_location, after)) = stack.pop() {
@@ -152,7 +155,7 @@ impl <'a> IfBlockBuilder<'a> {
 
 impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
     fn begin<'b>(&'b mut self, builder : &mut InstructionBuilder<'a>) -> std::slice::Iter<'a, StatementData> {
-        self.label_locations[0] = Some(builder.operations.len());
+        self.label_locations[0] = Some(builder.operations.len() + 1); // + 1 to skip Sync
         self.add_condition(builder);
         self.label_locations[1] = Some(builder.operations.len() + 1); // + 1 to skip EnterBlock
         builder.usage_tracker.enter_scope(self.block_ids[0], builder.operations.len());
@@ -172,7 +175,7 @@ impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
             self.label_queue.push((jmp_dest, self.statements.len() * 2));
             builder.add_operation(OperationType::Jmp, vec![jmp_dest], None);
 
-            self.label_locations[self.index * 2].replace(builder.operations.len());
+            self.label_locations[self.index * 2].replace(builder.operations.len() + 1); // + 1 to skip Sync
             self.add_condition(builder);
             self.label_locations[self.index * 2 + 1].replace(builder.operations.len() + 1); // + 1 to skip EnterBlock
             builder.usage_tracker.enter_scope(self.block_ids[0], builder.operations.len());
@@ -182,7 +185,8 @@ impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
             builder.operations.push(OperationUnit::EnterBlock(self.block_ids[self.index]));
             Some(s.block.iter())
         } else {
-            self.label_locations[self.statements.len() * 2].replace(builder.operations.len());
+            self.label_locations[self.statements.len() * 2].replace(builder.operations.len() + 1);
+            builder.operations.push(OperationUnit::Sync);
             for &(o, index) in &self.label_queue {
                 let addr = self.label_locations[index].unwrap();
                 builder.register_state.allocate_addr(&builder.operands[o], addr);
@@ -427,10 +431,11 @@ impl <'a> InstructionBuilder <'a> {
         let mut used_stable = 0_u64;
 
         for (index) in 0..self.operations.len() {
+            print!("{} : ", index);
             operation_index_list.push(self.register_state.output.len());
             match std::mem::replace(&mut self.operations[index], OperationUnit::EnterBlock(0)) {
                 OperationUnit::EnterBlock(ref id) => {
-                    println!("Enter block");
+                    println!("Enter");
                     scopes.push(*id);
                     let operands = self.usage_tracker.get_initializations(*id);
                     self.register_state.reserve_variables(operands.size_hint().0);
@@ -442,12 +447,13 @@ impl <'a> InstructionBuilder <'a> {
                     self.register_state.enter_block(&self.operands);
                 },
                 OperationUnit::LeaveBlock(has_next) => {
-                    println!("Leave block");
+                    println!("Leave");
                     self.register_state.leave_block(&self.operands, has_next);
                     scopes.pop();
                 },
+                OperationUnit::Sync => {},
                 OperationUnit::Operation(mut operation) => {
-                    println!("{} : ", index);
+                    println!("Op");
                     let scope = *scopes.last().unwrap();
                     let mut invalid_now =  operation.invalidations;
                     let mut invalid_soon = self.usage_tracker.row_invalidations(index);
