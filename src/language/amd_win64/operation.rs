@@ -209,14 +209,15 @@ impl Operand {
 pub struct Operation {
     pub operator : OperationType,
     pub operands : Vec<usize>,
-    pub dest : Option<usize> // Many instructions have same dest as first operand, but they need to be kept separate in case the next usage of dest is incompatible.
+    pub dest : Option<usize>, // Many instructions have same dest as first operand, but they need to be kept separate in case the next usage of dest is incompatible.
+    pub invalidations : u64
 }
 
 
 impl Operation {
-    pub fn new(operator : OperationType, operands : Vec<usize>, dest : Option<usize>) -> Operation {
+    pub fn new(operator : OperationType, operands : Vec<usize>, dest : Option<usize>, invalidations : u64) -> Operation {
         Operation {
-            operator, operands, dest
+            operator, operands, dest, invalidations
         }
     }
 }

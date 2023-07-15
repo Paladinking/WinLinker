@@ -92,7 +92,6 @@ impl BlockStatementParser for IfBlockParser {
         parser.type_validate(&mut self.statements.last_mut().unwrap().block)?;
         parser.mark();
         let word = parser.read_word();
-        println!("word: {:?}", word);
         return if let Ok("else") = word {
             let condition = if let Ok("if") = parser.read_word() {
                 Some(parser.parse_expression()?)

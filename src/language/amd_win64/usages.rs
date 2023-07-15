@@ -1,6 +1,7 @@
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map, HashMap, HashSet};
 use std::ops::Range;
+use std::process::exit;
 use std::slice::Iter;
 use crate::language::amd_win64::compiler::OperationUnit;
 use crate::language::amd_win64::operation::{Operand, Operation};
@@ -33,21 +34,25 @@ impl Scope {
     }
 }
 
-struct UsageNode {
-    row : usize,
-    scope : usize,
+#[derive(Debug)]
+struct UsageStatus {
     value_needed : bool,
+    invalid_soon : u64,
+    used_after : bool,
 }
 
-impl UsageNode {
-    fn new(row : usize, scope : usize, value_needed : bool) -> UsageNode {
-        UsageNode {row, scope, value_needed}
+impl UsageStatus {
+    fn new(value_needed : bool, invalid_soon : u64, used_after : bool) -> UsageStatus {
+        UsageStatus {value_needed, invalid_soon, used_after}
     }
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Copy, Clone, Debug)]
 pub enum UsedAfter {
-    ValueNeeded, LocationNeeded, None
+    ValueNeeded, // Do not free
+    LocationNeeded, // Free, but do not allocate variable to location
+    DestNeeded, // LocationNeeded if op != dest, ValueNeeded if op == dest
+    None // Complete free
 }
 
 pub struct UsageTracker {
@@ -57,11 +62,15 @@ pub struct UsageTracker {
     // <first_scope_id, Vec<(scope-id, scope-row)>>
     scope_blocks : HashMap<usize, ScopeBlock>,
     scopes : HashMap<usize, Scope>,
-    usages : HashMap<(usize, usize), bool>,
+    // (id, row), only contains variables
+    usages : HashMap<(usize, usize), UsedAfter>,
     // <(operand-id, row)
     used_operands : HashMap<usize, usize>,
     // <scope-id, Vec<operand-id>
     initialized_operands : HashMap<usize, Vec<usize>>,
+    // Same len as operations, all invalidations of dest until next free.
+    invalidations: Vec<u64>,
+    variable_invalidations : HashMap<usize, u64>,
     outer_scope : usize
 }
 
@@ -70,7 +79,8 @@ impl UsageTracker {
         UsageTracker {
             scope_ids : Vec::new(), first_scope_ids : Vec::new(),
             usages : HashMap::new(), scopes : HashMap::new(), scope_blocks : HashMap::new(),
-            initialized_operands : HashMap::new(), used_operands : HashMap::new(), outer_scope : 0
+            initialized_operands : HashMap::new(), used_operands : HashMap::new(), outer_scope : 0,
+            invalidations : Vec::new(), variable_invalidations : HashMap::new()
         }
     }
 
@@ -104,27 +114,17 @@ impl UsageTracker {
         }
     }
 
-    fn scope_relation<'a>(scopes : &'a HashMap<usize, Scope>, mut scope : &'a Scope, mut other : &'a Scope) -> (bool, &'a Scope) {
-        if scope.path.len() > other.path.len() {
-            scope = &scopes[&scope.path[other.path.len() - 1]];
-        } else if scope.path.len() < other.path.len() {
-            other = &scopes[&other.path[scope.path.len() - 1]];
-        }
-        loop {
-            if scope.path.last() == other.path.last() {
-                return (false, scope);
-            }
-            if scope.block_id == other.block_id {
-                return (true, scope);
-            }
-            scope = &scopes[&scope.path[scope.path.len() - 2]];
-            other = &scopes[&other.path[other.path.len() - 2]];
-       }
-    }
-
     pub fn add_usage(&mut self, id : usize, row : usize, value_needed : bool) {
         let first_id = *self.first_scope_ids.last().unwrap();
-        self.usages.insert((id, row), value_needed);
+        // Important that dest is added after, so that value_needed is true
+        //  when same operand is used both in dest and operand.
+        let mut entry = self.usages.entry((id, row));
+        entry.and_modify(|e|{
+            debug_assert!(*e == UsedAfter::ValueNeeded);
+            if !value_needed {
+                *e = UsedAfter::DestNeeded
+            }
+        }).or_insert(if value_needed {UsedAfter::ValueNeeded} else {UsedAfter::None});
         if !self.used_operands.contains_key(&id) {
             self.scope_blocks.get_mut(&first_id).unwrap()
                 .initialized_variables.push(id);
@@ -132,31 +132,39 @@ impl UsageTracker {
         self.used_operands.insert(id, row);
     }
 
-    fn value_needed(&self, id : usize, mut scopes : Vec<usize>, operations : &Vec<OperationUnit>, start : usize) -> bool {
+    fn analyze_usage(&self, id : usize, mut scopes : Vec<usize>, operations : &Vec<OperationUnit>, start : usize) -> UsageStatus {
         let final_usage = *self.used_operands.get(&id).unwrap();
         let mut targets = vec![scopes.last().cloned()];
         let mut index = start;
         let mut visited = HashSet::new();
+        let mut needed_invalidations : Option<Option<u64>> = None;
+        let mut used_after = false;
+        let mut local_invalidations = 0_u64;
         loop {
             if index == operations.len() || index > final_usage {
-                return false;
+                break;
             }
             match &operations[index] {
-                OperationUnit::Operation(_) => {
-                    if targets.last().unwrap().is_none() {
-                        index  += 1;
-                        continue;
-                    }
-                    if let Some(&needed) = self.usages.get(&(id, index)) {
-                        if needed {
-                            return true;
-                        } else {
-                            if targets.len() == 1 {
-                                return false;
+                OperationUnit::Operation(op) => {
+                    if targets.last().unwrap().is_some() {
+                        if let Some(&needed) = self.usages.get(&(id, index)) {
+                            used_after = true;
+                            if needed != UsedAfter::None {
+                                if let Some(Some(invalidations)) = &mut needed_invalidations {
+                                    *invalidations |= local_invalidations;
+                                }
+                                needed_invalidations.get_or_insert(Some(local_invalidations));
+                            }
+                            if needed != UsedAfter::ValueNeeded
+                            {
+                                if targets.len() == 1 {
+                                    break;
+                                }
                             }
                             *targets.last_mut().unwrap() = None;
                         }
                     }
+                    local_invalidations |= op.invalidations;
                 }
                 OperationUnit::EnterBlock(scope_id) => {
                     scopes.push(*scope_id);
@@ -196,28 +204,63 @@ impl UsageTracker {
             }
             index += 1;
         }
+
+        return if let Some(invalidations) = needed_invalidations.get_or_insert(None) {
+            UsageStatus::new(true, *invalidations, used_after)
+        } else {
+             UsageStatus::new(false, 0, used_after)
+        };
     }
 
     pub fn finalize(&mut self, operations : &Vec<OperationUnit>, variable_count : usize) {
+        self.invalidations.resize(operations.len(), 0);
         debug_assert!(self.first_scope_ids.is_empty());
         let mut scopes = Vec::with_capacity(self.scope_ids.capacity());
         for (index, operation) in operations.iter().enumerate() {
-
             match operation {
                 OperationUnit::Operation(operation) => {
-                    println!("{:?}", operation);
+                    println!("\n{:?}", operation);
+                    let mut dest_status = None;
+                    let get_usage = |status: &UsageStatus| if status.value_needed {
+                        UsedAfter::ValueNeeded
+                    } else if status.used_after {
+                        UsedAfter::LocationNeeded
+                    } else {
+                        UsedAfter::None
+                    };
                     if let Some(dest) = operation.dest {
                         if dest < variable_count {
-                            let value_needed = self.value_needed(
-                                dest, scopes.clone(), operations, index + 1);
-                            println!("Value needed(dest {}) : {}", index, value_needed);
+                            let status = self.analyze_usage(dest, scopes.clone(), operations, index + 1);
+                            self.usages.insert((dest, index), get_usage(&status));
+                            self.invalidations[index] = status.invalid_soon;
+                            *self.variable_invalidations.entry(dest).or_insert(0) |= status.invalid_soon;
+                            dest_status  = Some(status);
+                            println!("Value needed(dest {}) : {:?}", index, dest_status.as_ref().unwrap());
+                        } else {
+                            self.usages.insert((dest, index), UsedAfter::ValueNeeded);
                         }
                     }
                     for (i, operand) in operation.operands.iter().enumerate() {
                         if *operand < variable_count {
-                            let value_needed = self.value_needed(
-                                *operand, scopes.clone(), operations, index + 1);
-                            println!("Value needed({}, {}) : {}", index, *operand, value_needed);
+                            if operation.dest == Some(*operand) {
+                                let dest_status = dest_status.as_ref().unwrap();
+                                if dest_status.value_needed {
+                                    self.usages.insert((*operand, index), UsedAfter::DestNeeded);
+                                } else if dest_status.used_after {
+                                    self.usages.insert((*operand, index), UsedAfter::LocationNeeded);
+                                } else {
+                                    self.usages.insert((*operand, index), UsedAfter::None);
+                                }
+                                println!("Used in dest({}, {}) : {:?}", i, index, UsageStatus::new(false, 0, dest_status.used_after));
+                            } else {
+                                let status = self.analyze_usage(
+                                    *operand, scopes.clone(), operations, index + 1);
+                                self.usages.insert((*operand, index), get_usage(&status));
+                                *self.variable_invalidations.entry(*operand).or_insert(0) |= status.invalid_soon;
+                                println!("Value needed({}, {}) : {:?}", i, index, status);
+                            }
+                        } else {
+                            self.usages.insert((*operand, index), UsedAfter::None);
                         }
                     }
                 }
@@ -232,34 +275,29 @@ impl UsageTracker {
     }
 
     pub fn get_initializations(&self, scope_id : usize) -> impl Iterator<Item=&usize> {
-        if let Some(list) = self.initialized_operands.get(&scope_id) {
-            return list.iter();
+        if let Some(block) = self.scope_blocks.get(&scope_id) {
+            return block.initialized_variables.iter();
         }
         return [].iter();
     }
 
     pub fn used_after(&self, id : usize, row : usize) -> UsedAfter {
-        /*if self.free_usages.contains_key(&(id, row)) {
-            if self.final_usages.contains(&(id, row))  {
-                return UsedAfter::None;
-            }
-            return UsedAfter::LocationNeeded;
-        }*/
-        return UsedAfter::ValueNeeded;
+        if let Some(usage) = self.usages.get(&(id, row)) {
+            return *usage;
+        }
+        return UsedAfter::None;
     }
 
-    pub fn next_free(&self, id : usize, row : usize, scope : usize) -> usize {
-        /*let first_scope_id = self.scopes.iter().find_map(|(k, v)|
-            if v.iter().find(|&s| s.id == scope).is_some() {Some(*k)} else {None}
-        ).unwrap();
-        self.free_usages.iter().filter_map(|((operand_id, r), s)|
-            if *operand_id == id && *r >= row && (s.id == scope || s.first_id != first_scope_id) {Some(*r)} else {None}
-        ).reduce(usize::max).unwrap()*/0
+    pub fn row_invalidations(&self, row : usize) -> u64 {
+        return self.invalidations[row];
     }
 
-    pub fn final_usage(&self, id : usize) -> usize {
-        /*self.final_usages.iter().filter_map(|(operand_id, row )|
-            if *operand_id == id { Some(*row) } else {None}
-        ).reduce(usize::max).unwrap()*/0
+    pub fn mark_dest(&mut self, id : usize, row : usize) {
+        debug_assert!(*self.usages.get(&(id, row)).unwrap() == UsedAfter::DestNeeded);
+        self.usages.insert((id, row), UsedAfter::ValueNeeded);
+    }
+
+    pub fn variable_invalidations(&self, id : usize) -> u64 {
+        return *self.variable_invalidations.get(&id).unwrap();
     }
 }

@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
+use std::ptr;
 use std::rc::Rc;
 use bumpalo::Bump;
 use crate::language::amd_win64::operation::IdTracker;
@@ -13,6 +14,7 @@ use crate::language::parser::{Expression, ExpressionData, Variable};
 use crate::language::parser::statement::{IfStatement, Statement, StatementData};
 use crate::language::types::Type;
 
+#[derive(Debug)]
 pub enum OperationUnit {
     Operation(Operation), // Real operation
     EnterBlock(usize),
@@ -226,8 +228,11 @@ impl <'a> InstructionBuilder <'a> {
     }
 
     fn add_operation(&mut self, operation : OperationType, operands : Vec<usize>, dest : Option<usize>) {
+        let mut size = OperandSize::QWORD;
         for (i, &operand) in operands.iter().enumerate() {
-            self.usage_tracker.add_usage(operand, self.operations.len(), true);
+            if operand < self.variable_count {
+                self.usage_tracker.add_usage(operand, self.operations.len(), true);
+            }
             let hint = operation.bitmap_hint(i, self.operands[operand].size);
             let new_hint = hint & self.operands[operand].hint;
             if new_hint != 0 {
@@ -236,7 +241,10 @@ impl <'a> InstructionBuilder <'a> {
         }
 
         if let Some(op) = &dest {
-            self.usage_tracker.add_usage(*op, self.operations.len(), false);
+            size = self.operands[*op].size;
+            if *op < self.variable_count {
+                self.usage_tracker.add_usage(*op, self.operations.len(), false);
+            }
             if let Some(first) = operands.first() {
                 let new_hint = self.operands[*op].hint & self.operands[*first].hint;
                 if new_hint != 0 {
@@ -244,7 +252,9 @@ impl <'a> InstructionBuilder <'a> {
                 }
             }
         }
-        self.operations.push(OperationUnit::Operation(Operation::new(operation, operands, dest)));
+
+        self.operations.push(OperationUnit::Operation(Operation::new(
+            operation, operands, dest, operation.invalidations(size))));
     }
 
     fn create_operand(&mut self, size : OperandSize) -> usize {
@@ -346,6 +356,7 @@ impl <'a> InstructionBuilder <'a> {
             self.add_operation(OperationType::Mov, vec![first, operand], Some(dest_index));
         } else if let Some(OperationUnit::Operation(instruction)) =  self.operations.last_mut() {
             instruction.dest = Some(dest_index);
+            debug_assert!(dest_index < self.variable_count);
             self.usage_tracker.add_usage(dest_index, self.operations.len() - 1, false);
         } else {
             unreachable!("An operation was added..");
@@ -405,34 +416,12 @@ impl <'a> InstructionBuilder <'a> {
             });
 
         self.usage_tracker.leave_scope();
-        self.usage_tracker.finalize(&self.operations, self.variable_count);
+        self.usage_tracker.finalize(&mut self.operations, self.variable_count);
         self
     }
 
-    fn invalidation(&self, operation : &Operation) -> u64 {
-        if let Some(dest) = operation.dest {
-            operation.operator.invalidations(self.operands[dest].size)
-        } else {
-            0
-        }
-    }
-
-    // Not perfect, includes other scopes, but might rarely matter.
-    fn invalid_soon(&self, row : usize, scope : usize, operation : &Operation) -> u64 {
-        if let Some(dest) = operation.dest {
-            let next_free = self.usage_tracker.next_free(dest, row, scope);
-            if next_free == row {
-                return 0;
-            }
-            return self.operations[(row + 1)..next_free].iter()
-                .filter_map(|op| op.operation())
-                .fold(0, |map, operation|
-                    map | self.invalidation(operation))
-        }
-        return 0;
-    }
-
     pub fn compile(mut self) {
+        println!("\n");
         let mut scopes = Vec::new();
         let mut operation_index_list = Vec::with_capacity(self.operations.len());
         let mut used_stable = 0_u64;
@@ -441,29 +430,27 @@ impl <'a> InstructionBuilder <'a> {
             operation_index_list.push(self.register_state.output.len());
             match std::mem::replace(&mut self.operations[index], OperationUnit::EnterBlock(0)) {
                 OperationUnit::EnterBlock(ref id) => {
+                    println!("Enter block");
                     scopes.push(*id);
                     let operands = self.usage_tracker.get_initializations(*id);
                     self.register_state.reserve_variables(operands.size_hint().0);
                     for operand_id in operands {
-                        let final_usage = self.usage_tracker.final_usage(*operand_id);
-                        let invalid_soon = self.operations[(index + 1)..final_usage].iter()
-                            .filter_map(|op| op.operation())
-                            .fold(0, |map, operation|
-                                map | self.invalidation(operation));
+                        let invalid_soon = self.usage_tracker.variable_invalidations(*operand_id);
                         let operand = &mut self.operands[*operand_id];
                         self.register_state.allocate_variable(*operand_id, operand, invalid_soon);
                     }
                     self.register_state.enter_block(&self.operands);
                 },
                 OperationUnit::LeaveBlock(has_next) => {
+                    println!("Leave block");
                     self.register_state.leave_block(&self.operands, has_next);
                     scopes.pop();
                 },
                 OperationUnit::Operation(mut operation) => {
-                    print!("{} : ", index);
+                    println!("{} : ", index);
                     let scope = *scopes.last().unwrap();
-                    let mut invalid_now =  self.invalidation(&operation);
-                    let mut invalid_soon = self.invalid_soon(index, scope, &operation);
+                    let mut invalid_now =  operation.invalidations;
+                    let mut invalid_soon = self.usage_tracker.row_invalidations(index);
                     let mut bitmap = 1;
                     let destroyed = operation.operator.destroyed();
                     for (i, id) in operation.operands.iter_mut().enumerate() {
@@ -523,7 +510,10 @@ impl <'a> InstructionBuilder <'a> {
                         let first = *operation.operands.first().unwrap();
                         self.operands[first].merge_into(&self.operands[dest]);
                         let usage = self.usage_tracker.used_after(dest, index);
-                        if usage != UsedAfter::ValueNeeded {
+                        if usage == UsedAfter::DestNeeded {
+                            // Make sure this reg does not get freed later
+                            self.usage_tracker.mark_dest(dest, index);
+                        } else if usage != UsedAfter::ValueNeeded {
                             self.register_state.free(&self.operands[dest]);
                         }
                     } else if let Some(&first) = operation.operands.first() {
@@ -532,10 +522,12 @@ impl <'a> InstructionBuilder <'a> {
                             self.register_state.free(&self.operands[first]);
                         }
                     }
-                    for &operand in &operation.operands[1..] {
-                        let usage = self.usage_tracker.used_after(operand, index);
+                    for operand in &operation.operands[1..] {
+                        let usage = self.usage_tracker.used_after(*operand, index);
                         if usage != UsedAfter::ValueNeeded {
-                            self.register_state.free(&self.operands[operand]);
+                            if !self.register_state.is_free(&self.operands[*operand]) {
+                                self.register_state.free(&self.operands[*operand]);
+                            }
                         }
                     }
 
