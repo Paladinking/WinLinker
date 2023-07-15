@@ -219,7 +219,6 @@ impl UsageTracker {
         for (index, operation) in operations.iter().enumerate() {
             match operation {
                 OperationUnit::Operation(operation) => {
-                    println!("\n{:?}", operation);
                     let mut dest_status = None;
                     let get_usage = |status: &UsageStatus| if status.value_needed {
                         UsedAfter::ValueNeeded
@@ -235,7 +234,6 @@ impl UsageTracker {
                             self.invalidations[index] = status.invalid_soon;
                             *self.variable_invalidations.entry(dest).or_insert(0) |= status.invalid_soon;
                             dest_status  = Some(status);
-                            println!("Value needed(dest {}) : {:?}", index, dest_status.as_ref().unwrap());
                         } else {
                             self.usages.insert((dest, index), UsedAfter::ValueNeeded);
                         }
@@ -251,13 +249,11 @@ impl UsageTracker {
                                 } else {
                                     self.usages.insert((*operand, index), UsedAfter::None);
                                 }
-                                println!("Used in dest({}, {}) : {:?}", i, index, UsageStatus::new(false, 0, dest_status.used_after));
                             } else {
                                 let status = self.analyze_usage(
                                     *operand, scopes.clone(), operations, index + 1);
                                 self.usages.insert((*operand, index), get_usage(&status));
                                 *self.variable_invalidations.entry(*operand).or_insert(0) |= status.invalid_soon;
-                                println!("Value needed({}, {}) : {:?}", i, index, status);
                             }
                         } else {
                             self.usages.insert((*operand, index), UsedAfter::None);

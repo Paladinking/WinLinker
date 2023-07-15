@@ -189,7 +189,6 @@ impl RegisterState {
             R13 => 12, R14 => 13, R15 => 14,
             0 => {return None;}
             _ => {
-                println!("{:b}", bitmap);
                 panic!("Bad bitmap")
             }
         })
@@ -432,16 +431,70 @@ impl RegisterState {
         for (id, (allocation, _ )) in self.saved_variables.last().unwrap() {
             self.variables.push((*id, allocation.clone()));
         }
-        for (id, allocation) in &self.variables[0..size] {
-            if !self.is_free(&operands[*id]) {
+        for index in 0..size {
+            let (id, allocation) = self.variables[index].clone();
+            if !self.is_free(&operands[id]) {
+                let cur_allocation = operands[id].allocation.get();
+                //TODO: This is costly and not really needed, but makes the logic easier
+                if self.allocations[cur_allocation].ne(&allocation) {
+                    self.restore_allocation(cur_allocation, &allocation);
+                }
+                debug_assert!(self.allocations[operands[id].allocation.get()].eq(&allocation));
                 self.saved_variables.last_mut().unwrap().insert(
-                    *id, (self.allocations[operands[*id].allocation.get()].clone(), false)
+                    id, (allocation, false)
                 );
             } else {
                 self.saved_variables.last_mut().unwrap().insert(
-                    *id, (allocation.clone(), true)
+                    id, (allocation, true)
                 );
             }
+        }
+    }
+
+    fn restore_allocation(&mut self, cur_allocation : usize, target_allocation : &MemoryAllocation) {
+        let val = self.get_val(cur_allocation);
+        match &target_allocation {
+            MemoryAllocation::Register(index, size) => {
+                if let Some(all) = self.registers[*index].operand {
+                    let target = self.get_val(all);
+                    let scratch_size = self.allocations[all].size();
+                    if let Some(i) = Self::get_register(self.free_gen) {
+                        self.registers[i].operand.replace(all);
+                        self.allocations[all] = MemoryAllocation::Register(i, scratch_size);
+                    } else {
+                        let mem = self.get_memory(scratch_size);
+                        self.allocations[all] = MemoryAllocation::Memory(mem, scratch_size);
+                    };
+                    let scratch = self.get_val(all);
+                    self.add_instruction(OperationType::Mov, scratch_size,
+                                         vec![scratch, target.clone()]);
+                    self.add_instruction(OperationType::Mov, *size,
+                                         vec![target, val]);
+                    self.free_allocation(cur_allocation, true);
+                    self.allocations[cur_allocation] = target_allocation.clone();
+                } else {
+                    self.free_allocation(cur_allocation, true);
+                    self.allocations[cur_allocation] = target_allocation.clone();
+                    self.registers[*index].operand.replace(cur_allocation);
+                    self.add_instruction(
+                        OperationType::Mov,
+                        *size, vec![self.get_val(cur_allocation), val]);
+                }
+            }
+            MemoryAllocation::Memory(_, size) => {
+                debug_assert!(
+                    if let MemoryAllocation::Register(..) = self.allocations[cur_allocation] {
+                        true
+                    } else {
+                        false
+                    }
+                );
+                self.free_allocation(cur_allocation, true);
+                self.allocations[cur_allocation] = target_allocation.clone();
+                self.add_instruction(OperationType::Mov,
+                                     *size, vec![self.get_val(cur_allocation), val]);
+            }
+            _ => panic!("Invalid location")
         }
     }
 
@@ -450,50 +503,7 @@ impl RegisterState {
         for (&id, (allocation, _ )) in &to_restore {
             let cur_allocation = operands[id].allocation.get();
             if !self.is_free(&operands[id]) && self.allocations[cur_allocation].ne(allocation) {
-                let val = self.get_val(cur_allocation);
-                match &allocation {
-                    MemoryAllocation::Register(index, size) => {
-                        if let Some(all) = self.registers[*index].operand {
-                            let target = self.get_val(all);
-                            let scratch_size = self.allocations[all].size();
-                            if let Some(i) = Self::get_register(self.free_gen) {
-                                self.registers[i].operand.replace(all);
-                                self.allocations[all] = MemoryAllocation::Register(i, scratch_size);
-                            } else {
-                                let mem = self.get_memory(scratch_size);
-                                self.allocations[all] = MemoryAllocation::Memory(mem, scratch_size);
-                            };
-                            let scratch = self.get_val(all);
-                            self.add_instruction(OperationType::Mov, scratch_size,
-                                vec![scratch, target.clone()]);
-                            self.add_instruction(OperationType::Mov, *size,
-                                                 vec![target, val]);
-                            self.free_allocation(cur_allocation, true);
-                            self.allocations[cur_allocation] = allocation.clone();
-                        } else {
-                            self.free_allocation(cur_allocation, true);
-                            self.allocations[cur_allocation] = allocation.clone();
-                            self.registers[*index].operand.replace(cur_allocation);
-                            self.add_instruction(
-                                OperationType::Mov,
-                                *size, vec![self.get_val(cur_allocation), val]);
-                        }
-                    }
-                    MemoryAllocation::Memory(_, size) => {
-                        debug_assert!(
-                            if let MemoryAllocation::Register(..) = self.allocations[cur_allocation] {
-                                true
-                            } else {
-                                false
-                            }
-                        );
-                        self.free_allocation(cur_allocation, true);
-                        self.allocations[cur_allocation] = allocation.clone();
-                        self.add_instruction(OperationType::Mov,
-                            *size, vec![self.get_val(cur_allocation), val]);
-                    }
-                    _ => panic!("Invalid location")
-                }
+                self.restore_allocation(cur_allocation, allocation);
             }
         }
         if !has_next {return;}
