@@ -19,7 +19,9 @@ pub enum OperationUnit {
     Operation(Operation), // Real operation
     EnterBlock(usize),
     LeaveBlock(bool),
-    Sync
+    SyncPush(usize),
+    SyncLoad,
+    SyncPop
 }
 
 impl OperationUnit {
@@ -69,7 +71,6 @@ impl <'a> IfBlockBuilder<'a> {
     }
 
     fn add_condition<'b>(&'b mut self, builder : &mut InstructionBuilder<'a>) {
-        builder.operations.push(OperationUnit::Sync);
         let expr = if let Some(e) = &self.statements[self.index].condition { e } else { return; };
         let mut location_offset = self.label_locations.len();
         // Extend label_locations with jumps within expression
@@ -156,6 +157,7 @@ impl <'a> IfBlockBuilder<'a> {
 impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
     fn begin<'b>(&'b mut self, builder : &mut InstructionBuilder<'a>) -> std::slice::Iter<'a, StatementData> {
         self.label_locations[0] = Some(builder.operations.len() + 1); // + 1 to skip Sync
+        builder.operations.push(OperationUnit::SyncPush(self.block_ids[0]));
         self.add_condition(builder);
         self.label_locations[1] = Some(builder.operations.len() + 1); // + 1 to skip EnterBlock
         builder.usage_tracker.enter_scope(self.block_ids[0], builder.operations.len());
@@ -176,6 +178,7 @@ impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
             builder.add_operation(OperationType::Jmp, vec![jmp_dest], None);
 
             self.label_locations[self.index * 2].replace(builder.operations.len() + 1); // + 1 to skip Sync
+            builder.operations.push(OperationUnit::SyncLoad);
             self.add_condition(builder);
             self.label_locations[self.index * 2 + 1].replace(builder.operations.len() + 1); // + 1 to skip EnterBlock
             builder.usage_tracker.enter_scope(self.block_ids[0], builder.operations.len());
@@ -185,8 +188,12 @@ impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
             builder.operations.push(OperationUnit::EnterBlock(self.block_ids[self.index]));
             Some(s.block.iter())
         } else {
-            self.label_locations[self.statements.len() * 2].replace(builder.operations.len() + 1);
-            builder.operations.push(OperationUnit::Sync);
+            if self.statements.last().unwrap().condition.is_some() {
+                // Sync only needed if program execution might not enter any case of if-statement.
+                builder.operations.push(OperationUnit::SyncLoad);
+            }
+            builder.operations.push(OperationUnit::SyncPop);
+            self.label_locations[self.statements.len() * 2].replace(builder.operations.len());
             for &(o, index) in &self.label_queue {
                 let addr = self.label_locations[index].unwrap();
                 builder.register_state.allocate_addr(&builder.operands[o], addr);
@@ -371,6 +378,7 @@ impl <'a> InstructionBuilder <'a> {
         let mut statement_stack = vec![statements.iter()];
         let mut builder_stack = Vec::new();
         let outer_scope_id = self.block_tracker.get_id();
+        self.operations.push(OperationUnit::SyncPush(outer_scope_id));
         self.operations.push(OperationUnit::EnterBlock(outer_scope_id));
         self.usage_tracker.enter_scope(outer_scope_id, self.operations.len());
         while let Some(iter) = statement_stack.last_mut() {
@@ -407,6 +415,7 @@ impl <'a> InstructionBuilder <'a> {
         let out = self.create_operand(exit.size);
         self.add_operation(OperationType::MovRet, vec![self.exit_code], Some(out));
         self.operations.push(OperationUnit::LeaveBlock(false));
+        self.operations.push(OperationUnit::SyncPop);
 
         self.operations.iter().rev()
             .filter_map(|op| op.operation())
@@ -437,13 +446,6 @@ impl <'a> InstructionBuilder <'a> {
                 OperationUnit::EnterBlock(ref id) => {
                     println!("Enter");
                     scopes.push(*id);
-                    let operands = self.usage_tracker.get_initializations(*id);
-                    self.register_state.reserve_variables(operands.size_hint().0);
-                    for operand_id in operands {
-                        let invalid_soon = self.usage_tracker.variable_invalidations(*operand_id);
-                        let operand = &mut self.operands[*operand_id];
-                        self.register_state.allocate_variable(*operand_id, operand, invalid_soon);
-                    }
                     self.register_state.enter_block(&self.operands);
                 },
                 OperationUnit::LeaveBlock(has_next) => {
@@ -451,7 +453,25 @@ impl <'a> InstructionBuilder <'a> {
                     self.register_state.leave_block(&self.operands, has_next);
                     scopes.pop();
                 },
-                OperationUnit::Sync => {},
+                OperationUnit::SyncPush(scope) => {
+                    println!("SyncPush");
+                    let operands = self.usage_tracker.get_initializations(scope);
+                    self.register_state.reserve_variables(operands.size_hint().0);
+                    for operand_id in operands {
+                        let invalid_soon = self.usage_tracker.variable_invalidations(*operand_id);
+                        let operand = &mut self.operands[*operand_id];
+                        self.register_state.allocate_variable(*operand_id, operand, invalid_soon);
+                    }
+                    self.register_state.push_state(&self.operands);
+                }
+                OperationUnit::SyncLoad => {
+                    println!("SyncLoad");
+                    self.register_state.load_state(&self.operands);
+                },
+                OperationUnit::SyncPop => {
+                    println!("SyncPop");
+                  self.register_state.pop_state();
+                },
                 OperationUnit::Operation(mut operation) => {
                     println!("Op");
                     let scope = *scopes.last().unwrap();

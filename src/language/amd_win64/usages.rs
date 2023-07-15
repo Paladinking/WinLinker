@@ -201,7 +201,7 @@ impl UsageTracker {
                         targets.push(scopes.last().cloned());
                     }
                 },
-                OperationUnit::Sync => {}
+                OperationUnit::SyncPush(_) | OperationUnit::SyncLoad | OperationUnit::SyncPop => {}
             }
             index += 1;
         }
@@ -267,7 +267,7 @@ impl UsageTracker {
                 OperationUnit::LeaveBlock(_) => {
                     scopes.pop().unwrap();
                 }
-                OperationUnit::Sync => {}
+                OperationUnit::SyncPush(_) | OperationUnit::SyncLoad | OperationUnit::SyncPop => {}
             }
         }
     }

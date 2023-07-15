@@ -426,30 +426,62 @@ impl RegisterState {
     }
 
     // Call after allocate_variables when entering block
-    pub fn enter_block(&mut self, operands : &Vec<Operand>) {
+    pub fn push_state(&mut self, operands : &Vec<Operand>) {
         let size = self.variables.len();
         for (id, (allocation, _ )) in self.saved_variables.last().unwrap() {
             self.variables.push((*id, allocation.clone()));
         }
         for index in 0..size {
-            let (id, allocation) = self.variables[index].clone();
+            let (id, ref allocation) = self.variables[index];
             if !self.is_free(&operands[id]) {
-                let cur_allocation = operands[id].allocation.get();
-                //TODO: This is costly and not really needed, but makes the logic easier
-                if self.allocations[cur_allocation].ne(&allocation) {
-                    self.restore_allocation(cur_allocation, &allocation);
-                }
-                debug_assert!(self.allocations[operands[id].allocation.get()].eq(&allocation));
                 self.saved_variables.last_mut().unwrap().insert(
-                    id, (allocation, false)
+                    id, (self.allocations[operands[id].allocation.get()].clone(), false)
                 );
             } else {
                 self.saved_variables.last_mut().unwrap().insert(
-                    id, (allocation, true)
+                    id, (allocation.clone(), true)
                 );
             }
         }
     }
+
+    pub fn enter_block(&mut self, operands : &Vec<Operand>) {
+        let mut saved = self.saved_variables.pop().unwrap();
+        for (id, (_, is_free)) in &mut saved {
+            *is_free = self.is_free(&operands[*id]);
+        }
+        self.saved_variables.push(saved);
+        self.load_state(operands);
+    }
+
+    pub fn load_state(&mut self, operands : &Vec<Operand>) {
+        let to_restore = self.saved_variables.pop().unwrap();
+        for (id, (allocation, _)) in &to_restore {
+            let cur_allocation = operands[*id].allocation.get();
+            if !self.is_free(&operands[*id]) && self.allocations[cur_allocation].ne(allocation) {
+                self.restore_allocation(cur_allocation, allocation);
+            }
+        }
+        for (&id, (allocation, is_free)) in &to_restore {
+            let index = operands[id].allocation.get();
+            if *is_free {
+                if !self.allocations[index].is_free() {
+                    self.free_allocation(index, false);
+                }
+            } else {
+                self.allocations[index] = allocation.clone();
+                if let MemoryAllocation::Register(reg, _) = &self.allocations[index] {
+                    self.registers[*reg].operand.replace(index);
+                }
+            }
+        }
+        self.saved_variables.push(to_restore);
+    }
+
+    pub fn pop_state(&mut self) {
+        self.saved_variables.pop().unwrap();
+    }
+
 
     fn restore_allocation(&mut self, cur_allocation : usize, target_allocation : &MemoryAllocation) {
         let val = self.get_val(cur_allocation);
@@ -506,20 +538,7 @@ impl RegisterState {
                 self.restore_allocation(cur_allocation, allocation);
             }
         }
-        if !has_next {return;}
-        for (&id, &(ref allocation, is_free)) in &to_restore {
-            let index = operands[id].allocation.get();
-            if is_free {
-                if !self.allocations[index].is_free() {
-                    self.free_allocation(index, false);
-                }
-            } else {
-                self.allocations[index] = allocation.clone();
-                if let MemoryAllocation::Register(reg, _) = &self.allocations[index] {
-                    self.registers[*reg].operand.replace(index);
-                }
-            }
-        }
+        self.saved_variables.push(to_restore);
     }
 
 
