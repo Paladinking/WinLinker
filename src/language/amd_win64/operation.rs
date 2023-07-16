@@ -18,7 +18,7 @@ pub enum OperationType {
     JmpE, JmpNE, JmpA, JmpB, JmpAE, JmpBE, JmpG, JmpL, JmpGE, JmpLE, Jmp,
     JmpNop, // A nop used for inverting Jmp
     Mov,
-    MovRet
+    MovRet, Ret
 }
 
 impl OperationType {
@@ -51,6 +51,7 @@ impl OperationType {
 
     // Returns a bitmap to all operands that are overridden by the operation
     // 00000001 means first, 00000010 means second, 00000101 means first and third etc
+    // Does not include dest.
     pub fn destroyed(&self) -> u8 {
         match self {
             OperationType::Cmp | OperationType::Push |
@@ -67,6 +68,29 @@ impl OperationType {
             OperationType::Mul | OperationType::Add | OperationType::Sub |
             OperationType::IDiv | OperationType::Div | OperationType::Or |
             OperationType::And | OperationType::Xor => 1,
+
+            OperationType::Ret => panic!("Bad state")
+        }
+    }
+
+    // Return if the instruction destroys operand at index.
+    // Operands here means operands as given to
+    pub fn is_destroyed(&self, index : usize) -> bool {
+        match self {
+            OperationType::IMul | OperationType::Mul | OperationType::IDiv |
+            OperationType::Div | OperationType::Add | OperationType::Sub |
+            OperationType::And | OperationType::Or | OperationType::Xor |
+            OperationType::Pop | OperationType::SetE | OperationType::SetNE |
+            OperationType::SetA | OperationType::SetB | OperationType::SetAE |
+            OperationType::SetBE | OperationType::SetG | OperationType::SetL |
+            OperationType::SetGE | OperationType::SetLE | OperationType::Mov => index == 1,
+            OperationType::Cmp | OperationType::Push | OperationType::JmpE |
+            OperationType::JmpNE | OperationType::JmpA | OperationType::JmpB |
+            OperationType::JmpAE | OperationType::JmpBE | OperationType::JmpG |
+            OperationType::JmpL | OperationType::JmpGE | OperationType::JmpLE |
+            OperationType::Jmp | OperationType::JmpNop | OperationType::MovRet => false,
+            // MovRet is wierd.. but it does not matter since RAX is volatile
+            OperationType::Ret => panic!("No operands")
         }
     }
 
@@ -85,7 +109,7 @@ impl OperationType {
             OperationType::JmpB | OperationType::JmpAE | OperationType::JmpBE |
             OperationType::JmpG | OperationType::JmpL | OperationType::JmpGE |
             OperationType::JmpLE | OperationType::Jmp | OperationType::JmpNop |
-            OperationType::Mov | OperationType::MovRet => 0
+            OperationType::Mov | OperationType::MovRet | OperationType::Ret => 0,
         }
     }
 
@@ -110,7 +134,9 @@ impl OperationType {
             OperationType::JmpG | OperationType::JmpL | OperationType::JmpGE |
             OperationType::JmpLE | OperationType::JmpNop => IMM64,
 
-            OperationType::Jmp => GEN_REG | IMM64
+            OperationType::Jmp => GEN_REG | IMM64,
+
+            OperationType::Ret => panic!("No first operand")
         }
     }
 
@@ -129,7 +155,7 @@ impl OperationType {
             OperationType::JmpNE | OperationType::JmpA | OperationType::JmpB |
             OperationType::JmpAE | OperationType::JmpBE | OperationType::JmpG |
             OperationType::JmpL | OperationType::JmpGE | OperationType::JmpLE |
-            OperationType::Jmp | OperationType::JmpNop => panic!("No second operand")
+            OperationType::Jmp | OperationType::JmpNop | OperationType::Ret => panic!("No second operand")
         }
     }
 

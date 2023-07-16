@@ -48,6 +48,7 @@ pub mod encoding {
     pub const RCX : u8 = 0b0001;
     pub const RDX : u8 = 0b0010;
     pub const RBX : u8 = 0b0011;
+    pub const RSP : u8 = 0b0100;
     pub const RBP : u8 = 0b0101;
     pub const RSI : u8 = 0b0110;
     pub const RDI : u8 = 0b0111;
@@ -84,6 +85,7 @@ pub struct RegisterState {
     free_gen : u64, // Bitmap of all free general purpose registers
     variables : Vec<(usize, MemoryAllocation)>,
     variable_map : u64, // Bitmap of all variables in registers
+    used_stable : u64, // Bitmap of all non-volatile registers destroyed.
     saved_variables : Vec<HashMap<usize, (MemoryAllocation, bool)>>,
     pub output : Vec<Instruction>
 }
@@ -95,6 +97,7 @@ pub fn register_string(bitmap : u64) -> &'static str {
         R11 => "r11", RBX => "rbx", RBP => "rbp",
         RDI => "rdi", RSI => "rsi", R12 => "r12",
         R13 => "r13", R14 => "r14", R15 => "r15",
+        RSP => "rsp",
         _ => "???"
     }
 }
@@ -106,6 +109,7 @@ pub fn register_bitmap(encoding : u8) -> u64 {
         encoding::RDI => RDI, encoding::R8 => R8, encoding::R9 => R9,
         encoding::R10 => R10, encoding::R11 => R11, encoding::R12 => R12,
         encoding::R13 => R13, encoding::R14 => R14, encoding::R15 => R15,
+        encoding::RSP => RSP,
         _ => panic!("Invalid encoding")
     }
 }
@@ -174,7 +178,8 @@ impl RegisterState {
         let allocations = vec![MemoryAllocation::None];
         RegisterState {
             registers, memory : Vec::new(), allocations, free_gen : GEN_REG,
-            variables : Vec::new(), variable_map : 0, saved_variables : Vec::new(), output : Vec::new()
+            variables : Vec::new(), variable_map : 0, saved_variables : Vec::new(),
+            output : Vec::new(), used_stable : 0
         }
     }
 
@@ -193,7 +198,6 @@ impl RegisterState {
             }
         })
     }
-
 
     // Finds a memory location large enough for size, marks it as taken and returns the index.
     fn get_memory(&mut self, size : OperandSize) -> usize {
@@ -232,6 +236,8 @@ impl RegisterState {
 
     fn add_instruction(&mut self, operation : OperationType, size : OperandSize, operands : Vec<InstructionOperand>) {
         let instruction = Instruction::new(operation, size, operands);
+        self.used_stable |= (operation.invalidations(size) & NON_VOL_GEN_REG);
+
         println!("{:?}", instruction);
         self.output.push(instruction);
     }
@@ -239,6 +245,11 @@ impl RegisterState {
     pub fn build_instruction(&mut self, operation : OperationType, operands : &[&Operand]) {
         let size = operands[0].size;
         // Need to collect to avoid borrowing self, probably fix.
+        for (i, &op) in operands.iter().enumerate() {
+            if operation.is_destroyed(i) {
+                self.used_stable |= (self.allocation_bitmap(op) & NON_VOL_GEN_REG);
+            }
+        }
         let vals : Vec<_> = operands.iter().map(|o|
             self.get_val(o.allocation.get())
         ).collect();
@@ -336,6 +347,7 @@ impl RegisterState {
                         self.allocations[index] = MemoryAllocation::Register(reg, size);
                         self.registers[reg].operand = Some(index);
                         self.free_gen &= !self.registers[reg].bitmap;
+                        self.used_stable |= (NON_VOL_GEN_REG & self.registers[reg].bitmap);
                     } else {
                         let mem = self.get_memory(size);
                         self.allocations[index] = MemoryAllocation::Memory(mem, size);
@@ -347,6 +359,45 @@ impl RegisterState {
                 }
             }
         }
+    }
+
+    // Returns the prologue and epilogue
+    // Note that epilogue is backwards
+    pub fn get_prologue_and_epilogue(&self) -> (Vec<Instruction>, Vec<Instruction>) {
+        let mut used_stable = self.used_stable;
+        let registers_to_save = self.used_stable.count_ones() as usize;
+        // Does not call __chkstk when allocating more than one page of stack memory...
+        // But function calls are yet to be implemented soo..
+        // See https://learn.microsoft.com/en-us/cpp/build/prolog-and-epilog
+        let mut prologue = Vec::with_capacity(registers_to_save + 1);
+        let mut epilogue = Vec::with_capacity(registers_to_save + 2);
+        epilogue.push(Instruction::new(OperationType::Ret, OperandSize::QWORD, vec![]));
+        while let Some(reg) = Self::get_register(used_stable) {
+            let op = InstructionOperand::Reg(self.registers[reg].encoding);
+            let instruction = Instruction::new(OperationType::Push,
+                                               OperandSize::QWORD, vec![op.clone()]);
+            prologue.push(instruction);
+            let instruction = Instruction::new(OperationType::Pop,
+                                               OperandSize::QWORD, vec![op]);
+            epilogue.push(instruction);
+            used_stable &= !self.registers[reg].bitmap;
+        }
+        debug_assert!(used_stable == 0);
+        let pushed_stack = 8 * registers_to_save;
+        let mut stack_size = self.memory.len();
+        // Allign stack
+        while (stack_size + pushed_stack) % 16 != 8 {
+            stack_size += 1;
+        }
+        let rsp = InstructionOperand::Reg(encoding::RSP);
+        let stack_im = InstructionOperand::Imm(stack_size as u64);
+        let stack_sub = Instruction::new(OperationType::Sub, OperandSize::QWORD,
+                                         vec![rsp.clone(), stack_im.clone()]);
+        let stack_add = Instruction::new(OperationType::Add, OperandSize::QWORD,
+                                         vec![rsp, stack_im]);
+        prologue.push(stack_sub);
+        epilogue.push(stack_add);
+        return (prologue, epilogue);
     }
 
     pub fn is_free(&self, operand : &Operand) -> bool {
@@ -493,6 +544,7 @@ impl RegisterState {
                     if let Some(i) = Self::get_register(self.free_gen) {
                         self.registers[i].operand.replace(all);
                         self.allocations[all] = MemoryAllocation::Register(i, scratch_size);
+                        self.used_stable |= (self.registers[i].bitmap & NON_VOL_GEN_REG);
                     } else {
                         let mem = self.get_memory(scratch_size);
                         self.allocations[all] = MemoryAllocation::Memory(mem, scratch_size);

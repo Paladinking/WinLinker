@@ -433,7 +433,9 @@ impl <'a> InstructionBuilder <'a> {
         self
     }
 
-    pub fn compile(mut self) {
+    pub fn compile(mut self) -> Vec<u8> {
+        // Remove last leave_block and syncPop
+        self.operations.truncate(self.operations.len() - 2);
         println!("\n");
         let mut scopes = Vec::new();
         let mut operation_index_list = Vec::with_capacity(self.operations.len());
@@ -490,13 +492,23 @@ impl <'a> InstructionBuilder <'a> {
                             bitmap, i, self.operands[*id].size
                         );
 
+                        let used_after = self.usage_tracker.used_after(*id, index);
+
+                        // Merge home location with first operand
+                        // Needed for moves, a bit ugly.
+                        if used_after == UsedAfter::None && *id >= self.variable_count {
+                            if let Some(dest) = operation.dest {
+                                self.operands[*id].home = self.operands[dest].home;
+                            }
+                        }
+
                         if self.register_state.is_free(&self.operands[*id]) {
                             self.register_state.allocate(
                                 &self.operands[*id],
                                 bitmap & MEM_GEN_REG, invalid_now, invalid_soon);
                         }
                         let mut allocation_bitmap = self.register_state.allocation_bitmap(&self.operands[*id]);
-                        let used_after = self.usage_tracker.used_after(*id, index);
+
 
                         let copy_needed = used_after == UsedAfter::ValueNeeded && destroyed & (1 << i) != 0;
                         let invalid_location = allocation_bitmap & bitmap == 0;
@@ -565,13 +577,21 @@ impl <'a> InstructionBuilder <'a> {
                 }
             }
         }
+        println!();
+        let (prologue, epilogue) = self.register_state.get_prologue_and_epilogue();
 
         let compiler = InstructionCompiler::new();
         let mut res = Vec::new();
         let mut address_list = Vec::with_capacity(self.register_state.output.len());
         let mut label_queue = Vec::new();
+        for instruction in &prologue {
+            compiler.compile_instruction(instruction, &mut res, &mut label_queue);
+        }
         for instruction in &self.register_state.output {
             address_list.push(res.len());
+            compiler.compile_instruction(instruction, &mut res, &mut label_queue);
+        }
+        for instruction in epilogue.iter().rev() {
             compiler.compile_instruction(instruction, &mut res, &mut label_queue);
         }
         for relocation in label_queue {
@@ -609,9 +629,6 @@ impl <'a> InstructionBuilder <'a> {
                 }
             }
         }
-
-        std::fs::write("out.bin", &res).unwrap();
-
-        println!();
+        return res;
     }
 }

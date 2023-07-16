@@ -73,7 +73,7 @@ impl Debug for InstructionOperand {
 }
 
 // An instruction contains everything about an instruction needed to compile it into machine code
-//  (except exact memory offsets). They can hash based on
+//  (except exact memory offsets). They can hash to give a matching mnemonic.
 #[derive(PartialEq, Hash, Eq)]
 pub struct Instruction {
     operation : OperationType,
@@ -163,7 +163,12 @@ impl InstructionCompiler {
         let mut mod_rm_index = None;
         let mut index = 0;
         println!("{:?}", instruction);
-        for op in self.map.get(instruction).unwrap() {
+        let mnemonic = if let Some(mnemonic) = self.map.get(instruction) {
+            mnemonic
+        } else {
+            panic!("Could not compile instruction : \"{:?}\", no matching mnemonic", instruction);
+        };
+        for op in mnemonic {
             match op {
                 Mnemonic::Prefix(val) | Mnemonic::Value(val) => res.push(*val),
                 Mnemonic::Rex(r) => rex = Some(*r),
@@ -388,6 +393,15 @@ fn create_instruction_map() -> HashMap<Instruction, Vec<Mnemonic>> {
                     vec![]
         );
     }
+    map.insert(
+        Instruction::mnemonic(OperationType::Push, OperandSize::QWORD, &[OperandType::Reg]),
+        vec![Opcode(0x50), PlusReg]);
+    map.insert(
+        Instruction::mnemonic(OperationType::Pop, OperandSize::QWORD, &[OperandType::Reg]),
+        vec![Opcode(0x58), PlusReg]);
+    map.insert(
+        Instruction::mnemonic(OperationType::Ret, OperandSize::QWORD, &[]),
+        vec![Opcode(0xC3)]);
     map
 }
 

@@ -1,11 +1,11 @@
 extern crate core;
-
-use std::io::Result;
-
 mod portable_executable;
 mod language;
 
-fn main() -> Result<()> {
-    language::parser::read_program(String::from("if_prog.txt"));
+
+
+fn main() -> Result<(), String> {
+    language::parse_and_compile("if_prog.txt", "out.bin")?;
+
     Ok(())
 }

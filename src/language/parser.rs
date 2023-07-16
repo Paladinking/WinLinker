@@ -6,9 +6,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter, Debug};
 use std::rc::Rc;
-use bumpalo::Bump;
 use std::str::FromStr;
-use crate::language::amd_win64::compiler::InstructionBuilder;
 use crate::language::operator::{DualOperator, SingleOperator};
 use crate::language::parser::expression_builder::ExpressionBuilder;
 use crate::language::types::Type;
@@ -77,9 +75,9 @@ impl Display for Expression {
 
 
 
-struct Program {
-    variables : HashMap<String, Rc<Variable>>,
-    statements : Vec<StatementData>
+pub struct Program {
+    pub variables : HashMap<String, Rc<Variable>>,
+    pub statements : Vec<StatementData>
 }
 
 struct Parser<'a> {
@@ -462,20 +460,8 @@ impl <'a>Parser<'a> {
     }
 }
 
-pub fn read_program(file : String) {
-    let arena = Bump::new();
-    let data = std::fs::read_to_string(file).unwrap();
-    let program = Parser::new(&data).parse();
-    let program = match program {
-        Ok(program) => program,
-        Err(e) => {
-            println!("{}", e);
-            return;
-        }
-    };
-    InstructionBuilder::new(&arena, &program.variables)
-        .with(&program.statements).compile();
-
+pub fn read_program(data : String) -> Result<Program, ParseError> {
+    return Parser::new(&data).parse();
 }
 
 #[cfg(test)]
