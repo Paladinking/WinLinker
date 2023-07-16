@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::fmt::{Debug, Formatter, Write};
+use std::fmt::{Debug, Formatter};
 use std::hash::Hash;
 use derivative::Derivative;
 use crate::language::amd_win64::compiler::AddressRelocation;

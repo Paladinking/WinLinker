@@ -1,9 +1,5 @@
-use std::cell::Cell;
-use std::collections::{HashMap, VecDeque};
-use std::io::Write;
-use std::ptr;
+use std::collections::{HashMap};
 use std::rc::Rc;
-use bumpalo::Bump;
 use crate::language::amd_win64::operation::IdTracker;
 use crate::language::amd_win64::usages::{UsageTracker, UsedAfter};
 use super::instruction::InstructionCompiler;
@@ -34,9 +30,9 @@ impl OperationUnit {
 }
 
 trait BlockCompiler<'a> {
-    fn begin<'b>(&'b mut self, builder: &mut InstructionBuilder<'a>) -> std::slice::Iter<'a, StatementData>;
+    fn begin<'b>(&'b mut self, builder: &mut InstructionBuilder) -> std::slice::Iter<'a, StatementData>;
 
-    fn end<'b>(&'b mut self, builder : &mut InstructionBuilder<'a>) -> Option<std::slice::Iter<'a, StatementData>>;
+    fn end<'b>(&'b mut self, builder : &mut InstructionBuilder) -> Option<std::slice::Iter<'a, StatementData>>;
 }
 
 struct IfBlockBuilder<'a> {
@@ -70,9 +66,9 @@ impl <'a> IfBlockBuilder<'a> {
         self.index * 2 + 1
     }
 
-    fn add_condition<'b>(&'b mut self, builder : &mut InstructionBuilder<'a>) {
+    fn add_condition(&mut self, builder : &mut InstructionBuilder) {
         let expr = if let Some(e) = &self.statements[self.index].condition { e } else { return; };
-        let mut location_offset = self.label_locations.len();
+        let location_offset = self.label_locations.len();
         // Extend label_locations with jumps within expression
         self.label_locations.resize(location_offset + expr.len(), None);
         let mut stack = vec![(expr.len() - 1, None, Some(self.else_location()), self.block_location())];
@@ -155,18 +151,18 @@ impl <'a> IfBlockBuilder<'a> {
 }
 
 impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
-    fn begin<'b>(&'b mut self, builder : &mut InstructionBuilder<'a>) -> std::slice::Iter<'a, StatementData> {
+    fn begin<'b>(&'b mut self, builder : &mut InstructionBuilder) -> std::slice::Iter<'a, StatementData> {
         self.label_locations[0] = Some(builder.operations.len());
         builder.operations.push(OperationUnit::SyncPush(self.block_ids[0]));
         self.add_condition(builder);
         self.label_locations[1] = Some(builder.operations.len());
-        builder.usage_tracker.enter_scope(self.block_ids[0], builder.operations.len());
+        builder.usage_tracker.enter_scope(self.block_ids[0]);
         builder.operations.push(OperationUnit::EnterBlock(self.block_ids[0]));
 
         self.statements[0].block.iter()
     }
 
-    fn end<'b>(&'b mut self, builder : &mut InstructionBuilder<'a>) -> Option<std::slice::Iter<'a, StatementData>> {
+    fn end<'b>(&'b mut self, builder : &mut InstructionBuilder) -> Option<std::slice::Iter<'a, StatementData>> {
         builder.operations.push(OperationUnit::LeaveBlock(self.index < self.statements.len() - 1));
         builder.usage_tracker.leave_scope();
         self.index += 1;
@@ -181,9 +177,9 @@ impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
             builder.operations.push(OperationUnit::SyncLoad);
             self.add_condition(builder);
             self.label_locations[self.index * 2 + 1].replace(builder.operations.len());
-            builder.usage_tracker.enter_scope(self.block_ids[0], builder.operations.len());
+            builder.usage_tracker.enter_scope(self.block_ids[0]);
             builder.usage_tracker.alt_scope(
-                self.block_ids[self.index], builder.operations.len(),
+                self.block_ids[self.index],
                 self.statements[self.index].condition.is_some());
             builder.operations.push(OperationUnit::EnterBlock(self.block_ids[self.index]));
             Some(s.block.iter())
@@ -211,29 +207,28 @@ pub struct AddressRelocation {
     pub size : OperandSize // Size of the address
 }
 
-pub struct InstructionBuilder <'a> {
+pub struct InstructionBuilder {
     operations: Vec<OperationUnit>,
     usage_tracker : UsageTracker,
     operands : Vec<Operand>,
     variable_count : usize,
-    arena : &'a Bump,
     register_state : RegisterState,
     block_tracker : IdTracker,
     exit_code : usize
 }
 
-impl <'a> InstructionBuilder <'a> {
-    pub fn new<'b> (arena : &'a Bump, vars: &'b HashMap<String, Rc<Variable>>) -> InstructionBuilder<'a> {
+impl InstructionBuilder {
+    pub fn new(vars: &HashMap<String, Rc<Variable>>) -> InstructionBuilder {
         let register_state = RegisterState::new();
-        let mut block_tracker = IdTracker::new();
+        let block_tracker = IdTracker::new();
         let operands = vars.iter().enumerate().map(|(i, (_, v))|{
             v.id.replace(Some(i));
             Operand::new(OperandSize::from(v.var_type))
         }).collect();
         let exit_code = vars.get("exit_code").unwrap().id.get().unwrap();
-        let mut builder = InstructionBuilder {
+        let builder = InstructionBuilder {
             operations: Vec::new(), usage_tracker : UsageTracker::new(),
-            operands, arena, register_state, block_tracker, exit_code, variable_count : vars.len()
+            operands, register_state, block_tracker, exit_code, variable_count : vars.len()
         };
         builder
     }
@@ -374,13 +369,13 @@ impl <'a> InstructionBuilder <'a> {
         }
     }
 
-    pub fn with(mut self, statements : &'a Vec<StatementData>) -> Self {
+    pub fn with(mut self, statements : &Vec<StatementData>) -> Self {
         let mut statement_stack = vec![statements.iter()];
         let mut builder_stack = Vec::new();
         let outer_scope_id = self.block_tracker.get_id();
         self.operations.push(OperationUnit::SyncPush(outer_scope_id));
         self.operations.push(OperationUnit::EnterBlock(outer_scope_id));
-        self.usage_tracker.enter_scope(outer_scope_id, self.operations.len());
+        self.usage_tracker.enter_scope(outer_scope_id);
         while let Some(iter) = statement_stack.last_mut() {
             if let Some(val) = iter.next() {
                 match &val.statement {
@@ -439,9 +434,8 @@ impl <'a> InstructionBuilder <'a> {
         println!("\n");
         let mut scopes = Vec::new();
         let mut operation_index_list = Vec::with_capacity(self.operations.len());
-        let mut used_stable = 0_u64;
 
-        for (index) in 0..self.operations.len() {
+        for index in 0..self.operations.len() {
             print!(" {} : ", index);
             operation_index_list.push(self.register_state.output.len());
             match std::mem::replace(&mut self.operations[index], OperationUnit::EnterBlock(0)) {
@@ -482,7 +476,6 @@ impl <'a> InstructionBuilder <'a> {
                 },
                 OperationUnit::Operation(mut operation) => {
                     print!("op ");
-                    let scope = *scopes.last().unwrap();
                     let mut invalid_now =  operation.invalidations;
                     let mut invalid_soon = self.usage_tracker.row_invalidations(index);
                     let mut bitmap = 1;
@@ -530,9 +523,6 @@ impl <'a> InstructionBuilder <'a> {
                                 self.register_state.free(&self.operands[*id]);
                             }
                             *id = new;
-                        }
-                        if destroyed & (1 << i) != 0 {
-                            used_stable |= allocation_bitmap & NON_VOL_GEN_REG
                         }
                         // Only the first operand uses invalid_soon, since that is the destination register
                         invalid_soon = 0;

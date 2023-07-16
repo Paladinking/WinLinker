@@ -1,6 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap};
 use crate::language::amd_win64::instruction::{Instruction, InstructionOperand};
-use crate::language::amd_win64::operation::{Operand, OperandSize, Operation, OperationType};
+use crate::language::amd_win64::operation::{Operand, OperandSize, OperationType};
 
 
 // Bitmaps of all locations an operand can be allocated at.
@@ -236,7 +236,7 @@ impl RegisterState {
 
     fn add_instruction(&mut self, operation : OperationType, size : OperandSize, operands : Vec<InstructionOperand>) {
         let instruction = Instruction::new(operation, size, operands);
-        self.used_stable |= (operation.invalidations(size) & NON_VOL_GEN_REG);
+        self.used_stable |= operation.invalidations(size) & NON_VOL_GEN_REG;
 
         println!("{:?}", instruction);
         self.output.push(instruction);
@@ -247,7 +247,7 @@ impl RegisterState {
         // Need to collect to avoid borrowing self, probably fix.
         for (i, &op) in operands.iter().enumerate() {
             if operation.is_destroyed(i) {
-                self.used_stable |= (self.allocation_bitmap(op) & NON_VOL_GEN_REG);
+                self.used_stable |= self.allocation_bitmap(op) & NON_VOL_GEN_REG;
             }
         }
         let vals : Vec<_> = operands.iter().map(|o|
@@ -347,7 +347,7 @@ impl RegisterState {
                         self.allocations[index] = MemoryAllocation::Register(reg, size);
                         self.registers[reg].operand = Some(index);
                         self.free_gen &= !self.registers[reg].bitmap;
-                        self.used_stable |= (NON_VOL_GEN_REG & self.registers[reg].bitmap);
+                        self.used_stable |= NON_VOL_GEN_REG & self.registers[reg].bitmap;
                     } else {
                         let mem = self.get_memory(size);
                         self.allocations[index] = MemoryAllocation::Memory(mem, size);
@@ -416,6 +416,7 @@ impl RegisterState {
         }
     }
 
+    #[allow(dead_code)]
     fn allocation_string(&self, allocation : &MemoryAllocation) -> String {
         match allocation {
             MemoryAllocation::Register(i, _) => {
@@ -470,7 +471,9 @@ impl RegisterState {
                 return;
             }
         }
+
         let index = self.get_memory(operand.size);
+        println!("Memory {:?}, {}", operand, index);
         operand.home.replace(index);
         self.saved_variables.last_mut().unwrap().insert(
             id, (MemoryAllocation::Memory(index, operand.size), true));
@@ -544,7 +547,7 @@ impl RegisterState {
                     if let Some(i) = Self::get_register(self.free_gen) {
                         self.registers[i].operand.replace(all);
                         self.allocations[all] = MemoryAllocation::Register(i, scratch_size);
-                        self.used_stable |= (self.registers[i].bitmap & NON_VOL_GEN_REG);
+                        self.used_stable |= self.registers[i].bitmap & NON_VOL_GEN_REG;
                     } else {
                         let mem = self.get_memory(scratch_size);
                         self.allocations[all] = MemoryAllocation::Memory(mem, scratch_size);
@@ -582,7 +585,7 @@ impl RegisterState {
         }
     }
 
-    pub fn leave_block(&mut self, operands : &Vec<Operand>, has_next : bool) {
+    pub fn leave_block(&mut self, operands : &Vec<Operand>, _has_next : bool) {
         let to_restore = self.saved_variables.pop().unwrap();
         for (&id, (allocation, _ )) in &to_restore {
             let cur_allocation = operands[id].allocation.get();

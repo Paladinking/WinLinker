@@ -1,10 +1,5 @@
-use std::cell::Cell;
-use std::collections::{hash_map, HashMap, HashSet};
-use std::ops::Range;
-use std::process::exit;
-use std::slice::Iter;
+use std::collections::{HashMap, HashSet};
 use crate::language::amd_win64::compiler::OperationUnit;
-use crate::language::amd_win64::operation::{Operand, Operation};
 
 struct ScopeBlock {
     scopes : Vec<usize>,
@@ -20,14 +15,13 @@ impl ScopeBlock {
 
 struct Scope {
     block_id : usize,
-    row : usize,
     last_child : usize,
     freed_variables : Vec<usize>
 }
 
 impl Scope {
-    fn new(block_id : usize, row : usize,  last_child : usize, path : Vec<usize>) -> Scope {
-        Scope {block_id, row, last_child, freed_variables : Vec::new()}
+    fn new(block_id : usize,  last_child : usize) -> Scope {
+        Scope {block_id, last_child, freed_variables : Vec::new()}
     }
 }
 
@@ -63,8 +57,6 @@ pub struct UsageTracker {
     usages : HashMap<(usize, usize), UsedAfter>,
     // <(operand-id, row)
     used_operands : HashMap<usize, usize>,
-    // <scope-id, Vec<operand-id>
-    initialized_operands : HashMap<usize, Vec<usize>>,
     // Same len as operations, all invalidations of dest until next free.
     invalidations: Vec<u64>,
     variable_invalidations : HashMap<usize, u64>,
@@ -76,16 +68,16 @@ impl UsageTracker {
         UsageTracker {
             scope_ids : Vec::new(), first_scope_ids : Vec::new(),
             usages : HashMap::new(), scopes : HashMap::new(), scope_blocks : HashMap::new(),
-            initialized_operands : HashMap::new(), used_operands : HashMap::new(), outer_scope : 0,
+            used_operands : HashMap::new(), outer_scope : 0,
             invalidations : Vec::new(), variable_invalidations : HashMap::new()
         }
     }
 
-    pub fn enter_scope(&mut self, scope_id : usize, scope_row : usize) {
+    pub fn enter_scope(&mut self, scope_id : usize) {
         self.first_scope_ids.push(scope_id);
         self.scope_ids.push(scope_id);
         self.scopes.entry(scope_id).or_insert_with(||
-            Scope::new(scope_id, scope_row, scope_id, self.scope_ids.clone()));
+            Scope::new(scope_id, scope_id));
         self.scope_blocks.entry(scope_id).or_insert_with(||
             ScopeBlock::new(vec![scope_id]));
     }
@@ -100,11 +92,11 @@ impl UsageTracker {
         }
     }
 
-    pub fn alt_scope(&mut self, scope_id : usize, scope_row : usize, condition : bool) {
+    pub fn alt_scope(&mut self, scope_id : usize, condition : bool) {
         let first_scope_id = *self.first_scope_ids.last().unwrap();
         *self.scope_ids.last_mut().unwrap() = scope_id;
         self.scopes.insert(scope_id,Scope::new(
-            first_scope_id, scope_row, scope_id, self.scope_ids.clone()));
+            first_scope_id, scope_id));
         self.scope_blocks.get_mut(&first_scope_id).unwrap().scopes.push(scope_id);
         if !condition {
             self.scope_blocks.get_mut(&first_scope_id).unwrap().conditional = false;
@@ -115,7 +107,7 @@ impl UsageTracker {
         let first_id = *self.first_scope_ids.last().unwrap();
         // Important that dest is added after, so that value_needed is true
         //  when same operand is used both in dest and operand.
-        let mut entry = self.usages.entry((id, row));
+        let entry = self.usages.entry((id, row));
         entry.and_modify(|e|{
             debug_assert!(*e == UsedAfter::ValueNeeded);
             if !value_needed {
@@ -177,11 +169,11 @@ impl UsageTracker {
                         }
                     }
                 }
-                OperationUnit::LeaveBlock(mut has_next) => {
+                OperationUnit::LeaveBlock(has_next) => {
                     scopes.pop().unwrap();
                     targets.pop().unwrap();
                     if targets.len() == 0 {
-                        if has_next {
+                        if *has_next {
                             let mut entered = 0;
                             loop {
                                 index += 1;
@@ -236,7 +228,7 @@ impl UsageTracker {
                             self.usages.insert((dest, index), UsedAfter::ValueNeeded);
                         }
                     }
-                    for (i, operand) in operation.operands.iter().enumerate() {
+                    for operand in &operation.operands {
                         if *operand < variable_count {
                             if operation.dest == Some(*operand) {
                                 let dest_status = dest_status.as_ref().unwrap();
