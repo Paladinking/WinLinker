@@ -499,6 +499,9 @@ impl RegisterState {
 
     pub fn enter_block(&mut self, operands : &Vec<Operand>) {
         let mut saved = self.saved_variables.pop().unwrap();
+        // Operands can be freed between load_state and enter_block if they
+        //  are freed in e.g a condition. In that case the operand does not
+        //  need to be restored later.
         for (id, (_, is_free)) in &mut saved {
             *is_free = self.is_free(&operands[*id]);
         }

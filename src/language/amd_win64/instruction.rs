@@ -157,7 +157,6 @@ impl InstructionCompiler {
     }
 
     pub fn compile_instruction(&self, instruction : &Instruction, res : &mut Vec<u8>, label_queue : &mut Vec<AddressRelocation>) {
-        let start = res.len();
         let mut rex : Option<u8> = None;
         let mut opcode_index = None;
         let mut mod_rm_index = None;
