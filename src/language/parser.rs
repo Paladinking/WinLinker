@@ -378,7 +378,6 @@ impl <'a>Parser<'a> {
     pub fn parse(mut self) -> Result<Program, ParseError> {
         self.parse_declarations()?;
         let mut statements = self.parse_statements()?;
-        println!("{:?}", statements);
         self.type_validate(&mut statements)?;
 
         Ok(Program {

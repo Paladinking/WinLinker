@@ -238,7 +238,6 @@ impl RegisterState {
         let instruction = Instruction::new(operation, size, operands);
         self.used_stable |= operation.invalidations(size) & NON_VOL_GEN_REG;
 
-        println!("{:?}", instruction);
         self.output.push(instruction);
     }
 
@@ -473,7 +472,6 @@ impl RegisterState {
         }
 
         let index = self.get_memory(operand.size);
-        println!("Memory {:?}, {}", operand, index);
         operand.home.replace(index);
         self.saved_variables.last_mut().unwrap().insert(
             id, (MemoryAllocation::Memory(index, operand.size), true));

@@ -339,7 +339,7 @@ fn read_export_section(bytes : &[u8], optional_header : &OptionalHeader, section
 
     let name_base = to_raw_address(section_table, export_directory_table.name_pointer_rva)?;
     let ordinal_base = to_raw_address(section_table, export_directory_table.ordinal_table_rva)?;
-    println!("Test");
+
     for index in 0..(export_directory_table.number_of_name_pointers as usize) {
         let rva = bytes_u32!(bytes, name_base + index * 4)?;
         let ordinal = bytes_u16!(bytes, ordinal_base + index * 2)?;

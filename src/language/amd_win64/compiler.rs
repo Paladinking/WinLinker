@@ -431,16 +431,13 @@ impl InstructionBuilder {
     pub fn compile(mut self) -> Vec<u8> {
         // Remove last leave_block and syncPop
         self.operations.truncate(self.operations.len() - 2);
-        println!("\n");
         let mut scopes = Vec::new();
         let mut operation_index_list = Vec::with_capacity(self.operations.len());
 
         for index in 0..self.operations.len() {
-            print!(" {} : ", index);
             operation_index_list.push(self.register_state.output.len());
             match std::mem::replace(&mut self.operations[index], OperationUnit::EnterBlock(0)) {
                 OperationUnit::EnterBlock(ref id) => {
-                    print!("enter ");
                     scopes.push(*id);
                     self.register_state.enter_block(&self.operands);
                     let to_free = self.usage_tracker.get_frees(*id);
@@ -451,12 +448,10 @@ impl InstructionBuilder {
                     }
                 },
                 OperationUnit::LeaveBlock(has_next) => {
-                    print!("leave ");
                     self.register_state.leave_block(&self.operands, has_next);
                     scopes.pop();
                 },
                 OperationUnit::SyncPush(scope) => {
-                    print!("syncPush ");
                     let operands = self.usage_tracker.get_initializations(scope);
                     self.register_state.reserve_variables(operands.size_hint().0);
                     for operand_id in operands {
@@ -467,15 +462,12 @@ impl InstructionBuilder {
                     self.register_state.push_state(&self.operands);
                 }
                 OperationUnit::SyncLoad => {
-                    print!("syncLoad ");
                     self.register_state.load_state(&self.operands);
                 },
                 OperationUnit::SyncPop => {
-                    print!("syncPop ");
                   self.register_state.pop_state();
                 },
                 OperationUnit::Operation(mut operation) => {
-                    print!("op ");
                     let mut invalid_now =  operation.invalidations;
                     let mut invalid_soon = self.usage_tracker.row_invalidations(index);
                     let mut bitmap = 1;
@@ -567,7 +559,6 @@ impl InstructionBuilder {
                 }
             }
         }
-        println!();
         let (prologue, epilogue) = self.register_state.get_prologue_and_epilogue();
 
         let compiler = InstructionCompiler::new();

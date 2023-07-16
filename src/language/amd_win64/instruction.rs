@@ -162,7 +162,6 @@ impl InstructionCompiler {
         let mut opcode_index = None;
         let mut mod_rm_index = None;
         let mut index = 0;
-        println!("{:?}", instruction);
         let mnemonic = if let Some(mnemonic) = self.map.get(instruction) {
             mnemonic
         } else {
@@ -246,10 +245,6 @@ impl InstructionCompiler {
         if let Some(rex) = rex {
             res.insert(opcode_index.unwrap(), rex);
         }
-        for b in &res[start..] {
-            print!("{:02X}", b);
-        }
-        println!();
     }
 }
 
