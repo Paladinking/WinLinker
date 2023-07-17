@@ -1,20 +1,67 @@
-
-
-mod storage_class {
+pub mod storage_class {
     pub const IMAGE_SYM_CLASS_NULL : u8 = 0;
     pub const IMAGE_SYM_CLASS_EXTERNAL : u8 = 2;
     pub const IMAGE_SYM_CLASS_STATIC : u8 = 3;
     pub const IMAGE_SYM_CLASS_FILE : u8 = 103;
 }
 
-enum AuxiliarySymbol {
-    Unknown,
-    File(String)
+pub struct StringTable {
+    pub data : Vec<u8>
 }
 
+impl StringTable {
+    pub fn new() -> StringTable {
+        StringTable {
+            data : Vec::new()
+        }
+    }
 
+    pub fn add_string(&mut self, mut s : Vec<u8>) -> u32 {
+        let index = self.data.len();
+        self.data.reserve(s.len() + 1);
+        self.data.extend_from_slice(&s);
+        self.data.push(0);
+        return index as u32;
+    }
 
-struct CoffSymbol {
+    pub fn write(&self, data : &mut Vec<u8>) {
+        let size : u32 = (self.data.len() + 4).try_into().expect("To big string table");
+        data.extend_from_slice(&size.to_le_bytes());
+        data.extend_from_slice(&self.data);
+    }
+}
+
+pub enum AuxiliarySymbol {
+    Unknown,
+    File(String),
+    SectionDefinition {
+        length : u32,
+        relocations : u16
+        // Rest is unused
+    }
+}
+
+impl AuxiliarySymbol {
+    pub fn write(&self, data: &mut Vec<u8>) {
+        match self {
+            AuxiliarySymbol::Unknown => {
+                data.resize(data.len() + 8, 0);
+            }
+            AuxiliarySymbol::File(path) => {
+                let mut bytes = path.clone().into_bytes();
+                bytes.resize(18, 0);
+                data.extend_from_slice(&bytes);
+            }
+            AuxiliarySymbol::SectionDefinition { length, relocations } => {
+                data.extend_from_slice(&length.to_le_bytes());
+                data.extend_from_slice(&relocations.to_le_bytes());
+                data.resize(data.len() + 12, 0);
+            }
+        }
+    }
+}
+
+pub struct CoffSymbol {
     name : String,
     value : [u8; 4],
     section_number : i16,
@@ -23,18 +70,46 @@ struct CoffSymbol {
     aux_symbols : Vec<AuxiliarySymbol>
 }
 
-struct SymbolTable {
-    symbols : Vec<CoffSymbol>
+impl CoffSymbol {
+    pub const SIZE : usize = 18;
+}
+
+pub struct SymbolTable {
+    pub symbols : Vec<CoffSymbol>,
+    pub symbol_count : u32
 }
 
 impl SymbolTable {
-    fn new() -> SymbolTable {
+    pub fn new() -> SymbolTable {
         SymbolTable {
-            symbols : Vec::new()
+            symbols : Vec::new(), symbol_count : 0
         }
     }
 
-    fn add_file(&mut self, file_name : String) {
+    pub fn write(&self, data: &mut Vec<u8>, string_table : &mut StringTable) {
+        for symbol in &self.symbols {
+            let name_data = symbol.name.clone().into_bytes();
+            if name_data.len() > 8 {
+                let index = string_table.add_string(name_data);
+                data.extend_from_slice(&0_u32.to_le_bytes());
+                data.extend_from_slice(&index.to_le_bytes());
+            } else {
+                data.extend_from_slice(&name_data);
+                data.resize(data.len() + 8 - name_data.len(), 0);
+            }
+            data.extend_from_slice(&symbol.value);
+            data.extend_from_slice(&symbol.section_number.to_le_bytes());
+            data.extend_from_slice(&symbol.symbol_type.to_le_bytes());
+            data.push(symbol.storage_class);
+            data.push(symbol.aux_symbols.len().try_into().expect(
+                "Nothing should have 256 aux symbols"));
+            for aux_symbol in &symbol.aux_symbols {
+                aux_symbol.write(data);
+            }
+        }
+    }
+
+    pub fn add_file(&mut self, file_name : String) {
         self.symbols.push(CoffSymbol {
             name : ".file".to_owned(),
             value : [0, 0, 0, 0],
@@ -43,20 +118,34 @@ impl SymbolTable {
             storage_class : storage_class::IMAGE_SYM_CLASS_FILE,
             aux_symbols : vec![AuxiliarySymbol::File(file_name)]
         });
+        self.symbol_count += 2;
     }
 
-    fn add_external(&mut self, symbol_name : String, section : i16) {
+    pub fn add_external(&mut self, symbol_name : &str, section : i16) {
         self.symbols.push(CoffSymbol {
-            name : symbol_name,
+            name : symbol_name.to_owned(),
             value : [0, 0, 0, 0],
             section_number : section,
             symbol_type : 0,
             storage_class : storage_class::IMAGE_SYM_CLASS_EXTERNAL,
             aux_symbols : vec![]
         });
+        self.symbol_count += 1;
     }
 
-    fn add_section(&mut self, section_name : String, section : i16, size : usize) {
-        
+    pub fn add_section(&mut self, section_name : String, section : i16, size : u32, relocations : u16) {
+        self.symbols.push(CoffSymbol {
+            name : section_name,
+            value : [0, 0, 0, 0],
+            section_number : section,
+            symbol_type : 0,
+            storage_class : storage_class::IMAGE_SYM_CLASS_STATIC,
+            aux_symbols : vec![
+                AuxiliarySymbol::SectionDefinition {
+                    length : size, relocations
+                }
+            ]
+        });
+        self.symbol_count += 2;
     }
 }

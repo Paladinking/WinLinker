@@ -1,25 +1,7 @@
 use crate::portable_executable::types::{CoffFileHeader, SectionHeader};
 use std::ops::BitAnd;
 
-#[derive(Debug, Copy, Clone)]
-pub enum CoffHeaderCharacteristic {
-    ImageFileRelocsStripped = 0x1,
-    ImageFileExecutableImage = 0x2,
-    ImageFileLineNumsStripped = 0x4,
-    ImageFileLocalSymsStripped = 0x8,
-    ImageFileAggressiveWsTrim = 0x10,
-    ImageFileLargeAddressAware = 0x20,
-    Unused = 0x40,
-    ImageFileBytesReversedLo = 0x80,
-    ImageFile32bitMachine = 0x100,
-    ImageFileDebugStripped = 0x200,
-    ImageFileRemovableRunFromSwap = 0x400,
-    ImageFileNetRunFromSwap = 0x800,
-    ImageFileSystem = 0x1000,
-    ImageFileDll = 0x2000,
-    ImageFileUpSystemOnly = 0x4000,
-    ImageFileBytesReversedHi = 0x8000,
-}
+
 
 #[derive(Debug, Copy, Clone)]
 #[allow(dead_code)]
@@ -74,26 +56,6 @@ impl Into<u32> for SectionHeaderCharacteristic {
 }
 
 
-impl CoffFileHeader {
-    pub const CHARACTERISTICS: [CoffHeaderCharacteristic; 16] = [
-        CoffHeaderCharacteristic::ImageFileRelocsStripped,
-        CoffHeaderCharacteristic::ImageFileExecutableImage,
-        CoffHeaderCharacteristic::ImageFileLineNumsStripped,
-        CoffHeaderCharacteristic::ImageFileLocalSymsStripped,
-        CoffHeaderCharacteristic::ImageFileAggressiveWsTrim,
-        CoffHeaderCharacteristic::ImageFileLargeAddressAware,
-        CoffHeaderCharacteristic::Unused,
-        CoffHeaderCharacteristic::ImageFileBytesReversedLo,
-        CoffHeaderCharacteristic::ImageFile32bitMachine,
-        CoffHeaderCharacteristic::ImageFileDebugStripped,
-        CoffHeaderCharacteristic::ImageFileRemovableRunFromSwap,
-        CoffHeaderCharacteristic::ImageFileNetRunFromSwap,
-        CoffHeaderCharacteristic::ImageFileSystem,
-        CoffHeaderCharacteristic::ImageFileDll,
-        CoffHeaderCharacteristic::ImageFileUpSystemOnly,
-        CoffHeaderCharacteristic::ImageFileBytesReversedHi,
-    ];
-}
 
 impl SectionHeader {
     pub const CHARACTERISTICS : [SectionHeaderCharacteristic; 34] = [

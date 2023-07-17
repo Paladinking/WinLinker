@@ -6,7 +6,6 @@ pub struct DosStub {
     pub offset : u32
 }
 
-
 #[derive(Debug)]
 pub struct CoffFileHeader {
     pub machine : u16,
