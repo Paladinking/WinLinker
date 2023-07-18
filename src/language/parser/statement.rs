@@ -12,6 +12,7 @@ pub struct IfStatement {
 pub enum Statement {
     Assignment {var : Rc<Variable>, expr : Vec<ExpressionData>},
     IfBlock(Vec<IfStatement>),
+    Return(Vec<ExpressionData>),
     Block(Vec<StatementData>)
 }
 

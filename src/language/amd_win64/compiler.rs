@@ -213,8 +213,7 @@ pub struct InstructionBuilder {
     operands : Vec<Operand>,
     variable_count : usize,
     register_state : RegisterState,
-    block_tracker : IdTracker,
-    exit_code : usize
+    block_tracker : IdTracker
 }
 
 impl InstructionBuilder {
@@ -225,10 +224,9 @@ impl InstructionBuilder {
             v.id.replace(Some(i));
             Operand::new(OperandSize::from(v.var_type))
         }).collect();
-        let exit_code = vars.get("exit_code").unwrap().id.get().unwrap();
         let builder = InstructionBuilder {
             operations: Vec::new(), usage_tracker : UsageTracker::new(),
-            operands, register_state, block_tracker, exit_code, variable_count : vars.len()
+            operands, register_state, block_tracker, variable_count : vars.len()
         };
         builder
     }
@@ -351,19 +349,20 @@ impl InstructionBuilder {
         }
     }
 
-    fn add_assigment(&mut self, dest : &Variable, expr : &Vec<ExpressionData>) {
+    fn add_assigment(&mut self, dest_index : usize, dest_size : OperandSize, expr : &Vec<ExpressionData>) {
         let mut locations = Vec::with_capacity(expr.len());
         let prev_len = self.operations.len();
         self.add_expressions(&expr, &mut locations, 0);
-        let dest_index = dest.id.get().unwrap();
+
         if prev_len ==  self.operations.len() { // Whole expression was only a variable or immediate value.
             let operand = *locations.last().unwrap();
-            let first = self.create_operand(OperandSize::from(dest.var_type));
+            let first = self.create_operand(dest_size);
             self.add_operation(OperationType::Mov, vec![first, operand], Some(dest_index));
         } else if let Some(OperationUnit::Operation(instruction)) =  self.operations.last_mut() {
             instruction.dest = Some(dest_index);
-            debug_assert!(dest_index < self.variable_count);
-            self.usage_tracker.add_usage(dest_index, self.operations.len() - 1, false);
+            if dest_index < self.variable_count {
+                self.usage_tracker.add_usage(dest_index, self.operations.len() - 1, false);
+            }
         } else {
             unreachable!("An operation was added..");
         }
@@ -376,11 +375,13 @@ impl InstructionBuilder {
         self.operations.push(OperationUnit::SyncPush(outer_scope_id));
         self.operations.push(OperationUnit::EnterBlock(outer_scope_id));
         self.usage_tracker.enter_scope(outer_scope_id);
+        let mut return_addr_list = Vec::new();
         while let Some(iter) = statement_stack.last_mut() {
             if let Some(val) = iter.next() {
                 match &val.statement {
                     Statement::Assignment { var, expr } => {
-                        self.add_assigment(var, expr);
+                        self.add_assigment( var.id.get().unwrap(),
+                                            OperandSize::from(var.var_type), expr);
                     }
                     Statement::IfBlock(if_statement) => {
                         let mut builder : Box<dyn BlockCompiler> = Box::new(
@@ -389,7 +390,17 @@ impl InstructionBuilder {
                         let iter = builder.begin(&mut self);
                         statement_stack.push(iter);
                         builder_stack.push(builder);
-                    }
+                    },
+                    Statement::Return(expr) => {
+                        let dest = self.create_operand(OperandSize::DWORD);
+                        self.add_assigment(dest, OperandSize::DWORD, expr);
+                        let out = self.create_operand(OperandSize::DWORD);
+                        self.add_operation(OperationType::MovRet, vec![dest],
+                                           Some(out));
+                        let jmp_ret = self.create_operand(OperandSize::QWORD);
+                        self.add_operation(OperationType::Jmp, vec![jmp_ret], None);
+                        return_addr_list.push(jmp_ret);
+                    },
                     Statement::Block(_) => todo!()
                 }
             } else {
@@ -406,9 +417,10 @@ impl InstructionBuilder {
             }
         }
 
-        let exit = &self.operands[self.exit_code];
-        let out = self.create_operand(exit.size);
-        self.add_operation(OperationType::MovRet, vec![self.exit_code], Some(out));
+        for op in return_addr_list {
+            self.register_state.allocate_addr(&self.operands[op],
+            self.operations.len());
+        }
         self.operations.push(OperationUnit::LeaveBlock(false));
         self.operations.push(OperationUnit::SyncPop);
 
@@ -556,6 +568,8 @@ impl InstructionBuilder {
                 }
             }
         }
+        // Include address of jump to epilogue.
+        operation_index_list.push(self.register_state.output.len());
         let (prologue, epilogue) = self.register_state.get_prologue_and_epilogue();
 
         let compiler = InstructionCompiler::new();
@@ -569,6 +583,8 @@ impl InstructionBuilder {
             address_list.push(res.len());
             compiler.compile_instruction(instruction, &mut res, &mut label_queue);
         }
+
+        address_list.push(res.len());
         for instruction in epilogue.iter().rev() {
             compiler.compile_instruction(instruction, &mut res, &mut label_queue);
         }

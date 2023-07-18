@@ -94,12 +94,12 @@ struct Parser<'a> {
 
 impl <'a>Parser<'a> {
     const SPACES : [char; 4] = ['\t', '\n', '\r', ' '];
-    const KEYWORDS : [&'static str; 3] = ["start", "end", "if"];
+    const KEYWORDS : [&'static str; 4] = ["start", "end", "if", "return"];
 
     fn new(data : &'a str) -> Parser<'a> {
         let types = Type::create_primitives();
         let mut variables : HashMap<String, Rc<Variable>> = HashMap::new();
-        variables.insert("exit_code".to_owned(), Rc::new(Variable::new(Type::U32)));
+        //variables.insert("exit_code".to_owned(), Rc::new(Variable::new(Type::U32)));
         let chars = data.chars();
         Parser {
             chars,
@@ -356,11 +356,22 @@ impl <'a>Parser<'a> {
                                 IfBlockParser::begin_block(self, pos)?
                             );
                         },
-                        _ => {
-                            let var = self.variables.get(word).ok_or_else(||
-                                ParseError::new(ParseErrorType::UnexpectedLiteral(word.to_owned()), pos)
-                            )?.clone();
+                        "return" => {
                             let (row, col) = self.get_pos();
+                            let expressions = self.parse_expression()?;
+                            self.assert_char(';')?;
+                            let statement = Statement::Return(expressions);
+                            let pos = (row, col - "return".len());
+                            targets.last_mut().unwrap()
+                                .add_statement(self, StatementData::new(statement, pos))?;
+                        }
+                        _ => {
+                            let (row, col) = self.get_pos();
+                            let var = self.variables.get(word).ok_or_else(||
+                                ParseError::new(ParseErrorType::UnexpectedLiteral(word.to_owned()),
+                                                (row,  col))
+                            )?.clone();
+
                             self.assert_char('=')?;
                             let expressions = self.parse_expression()?;
                             self.assert_char(';')?;
@@ -446,6 +457,9 @@ impl <'a>Parser<'a> {
                             validate_expression(cond, &Type::Bool)?;
                         }
                     }
+                },
+                Statement::Return(expr) => {
+                    validate_expression(expr, &Type::U32)?;
                 }
                 Statement::Block(_) => panic!("Should not exist (for now)...")
             }
