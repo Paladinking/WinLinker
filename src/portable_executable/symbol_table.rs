@@ -16,7 +16,7 @@ impl StringTable {
         }
     }
 
-    pub fn add_string(&mut self, mut s : Vec<u8>) -> u32 {
+    pub fn add_string(&mut self, s : Vec<u8>) -> u32 {
         let index = self.data.len();
         self.data.reserve(s.len() + 1);
         self.data.extend_from_slice(&s);
@@ -62,12 +62,12 @@ impl AuxiliarySymbol {
 }
 
 pub struct CoffSymbol {
-    name : String,
-    value : [u8; 4],
-    section_number : i16,
-    symbol_type : u16,
-    storage_class : u8,
-    aux_symbols : Vec<AuxiliarySymbol>
+    pub name : String,
+    pub value : [u8; 4],
+    pub section_number : i16,
+    pub symbol_type : u16,
+    pub storage_class : u8,
+    pub aux_symbols : Vec<AuxiliarySymbol>
 }
 
 impl CoffSymbol {
@@ -121,10 +121,10 @@ impl SymbolTable {
         self.symbol_count += 2;
     }
 
-    pub fn add_external(&mut self, symbol_name : &str, section : i16) {
+    pub fn add_external(&mut self, symbol_name : &str, section : i16, offset : u32) {
         self.symbols.push(CoffSymbol {
             name : symbol_name.to_owned(),
-            value : [0, 0, 0, 0],
+            value : offset.to_le_bytes(),
             section_number : section,
             symbol_type : 0,
             storage_class : storage_class::IMAGE_SYM_CLASS_EXTERNAL,

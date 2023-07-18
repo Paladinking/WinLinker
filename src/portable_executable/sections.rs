@@ -40,6 +40,10 @@ pub enum SectionHeaderCharacteristic {
     ImageScnMemWrite = 0x80000000,
 }
 
+pub enum SectionType {
+    Text
+}
+
 pub struct SectionHeader {
     pub name : String,
     pub virtual_size : u32,
@@ -64,10 +68,10 @@ impl SectionHeader {
         }
     }
 
-    pub fn write(&self, data : &mut Vec<u8>, string_table : &mut StringTable) {
+    pub fn write(&self, data : &mut Vec<u8>, string_table : Option<&mut StringTable>) {
         let bytes = self.name.clone().into_bytes();
-        if bytes.len() > 8 {
-            let index = string_table.add_string(bytes);
+        if bytes.len() > 8 && string_table.is_some() {
+            let index = string_table.unwrap().add_string(bytes);
             let index_ascii = index.to_string().into_bytes();
             debug_assert!(index_ascii.is_ascii() && index_ascii.len() < 8);
             data.push(b'/');
@@ -89,36 +93,28 @@ impl SectionHeader {
     }
 }
 
-pub trait Section {
-    fn get_object_header(&self) -> SectionHeader;
-
-    fn write(&self, data: &mut Vec<u8>);
-}
-
 pub struct TextSection {
-    pub data : Vec<u8>,
-    pub header : usize
+    pub data : Vec<u8>
 }
 
 impl TextSection {
     pub fn new(data : Vec<u8>) -> TextSection {
         TextSection {
-            data, header : 0
+            data
         }
     }
-}
 
-impl Section for TextSection {
-    fn get_object_header(&self) -> SectionHeader {
-        let mut raw_size = self.data.len().try_into().expect("Too big text section");
-        SectionHeader::new(String::from(".text"), raw_size,
-            SectionHeaderCharacteristic::ImageScnCntCode as u32 |
-                        SectionHeaderCharacteristic::ImageScnAlign16bytes as u32 |
-                        SectionHeaderCharacteristic::ImageScnMemExecute as u32 |
-                        SectionHeaderCharacteristic::ImageScnMemRead as u32)
+    pub fn write(&self, data: &mut Vec<u8>) {
+        data.extend_from_slice(&self.data);
     }
 
-    fn write(&self, data: &mut Vec<u8>) {
-        data.extend_from_slice(&self.data);
+    pub fn get_object_header(raw_size : u32, pointer_to_raw_data : u32) -> SectionHeader {
+        let mut sec = SectionHeader::new(String::from(".text"), raw_size,
+                           SectionHeaderCharacteristic::ImageScnCntCode as u32 |
+                               SectionHeaderCharacteristic::ImageScnAlign16bytes as u32 |
+                               SectionHeaderCharacteristic::ImageScnMemExecute as u32 |
+                               SectionHeaderCharacteristic::ImageScnMemRead as u32);
+        sec.pointer_to_raw_data = pointer_to_raw_data;
+        return sec;
     }
 }
