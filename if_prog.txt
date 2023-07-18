@@ -1,11 +1,13 @@
 u32 a;
 u32 b;
 start {
-    a = 5;
-    if a > 5 {
-        return 155;
+    a = 6;
+    b = 0;
+    while b < 100 {
+        a = a + 10;
+        b = b + 20;
     }
-
+    return a + b;
     b = 11 * 12;
     a = a * a;
     if 2 == 1 {

@@ -9,9 +9,16 @@ pub struct IfStatement {
 }
 
 #[derive(Debug)]
+pub struct WhileStatement {
+    pub condition : Vec<ExpressionData>,
+    pub block : Vec<StatementData>
+}
+
+#[derive(Debug)]
 pub enum Statement {
     Assignment {var : Rc<Variable>, expr : Vec<ExpressionData>},
     IfBlock(Vec<IfStatement>),
+    WhileBlock(WhileStatement),
     Return(Vec<ExpressionData>),
     Block(Vec<StatementData>)
 }
@@ -59,7 +66,7 @@ impl BlockStatementParser for BlockParser {
         Ok(())
     }
 
-    fn end_block(&mut self, _parser: &mut Parser) -> Result<Option<StatementData>, ParseError> {
+    fn end_block(&mut self, parser: &mut Parser) -> Result<Option<StatementData>, ParseError> {
         Ok(Some(StatementData::new(Statement::Block(
             std::mem::take(&mut self.statements),
         ), self.pos)))
@@ -113,5 +120,39 @@ impl BlockStatementParser for IfBlockParser {
                 Statement::IfBlock(std::mem::take(&mut self.statements)),
                 self.pos)))
         }
+    }
+}
+
+pub struct WhileBlockParser {
+    statement : Option<WhileStatement>,
+    pos : (usize, usize)
+}
+
+impl BlockStatementParser for WhileBlockParser {
+    fn begin_block(parser: &mut Parser, pos: (usize, usize)) -> Result<Box<Self>, ParseError> {
+        let expr = parser.parse_expression()?;
+        parser.assert_char('{')?;
+        return Ok(Box::new(WhileBlockParser {
+            statement : Some(WhileStatement {
+                condition : expr,
+                block : vec![]
+            }),
+            pos
+        }));
+    }
+
+    fn add_statement(&mut self, _parser: &mut Parser, statement: StatementData) -> Result<(), ParseError> {
+        self.statement.as_mut().unwrap().block.push(statement);
+        return Ok(());
+    }
+
+    fn end_block(&mut self, parser: &mut Parser) -> Result<Option<StatementData>, ParseError> {
+        parser.type_validate(&mut self.statement.as_mut().unwrap().block)?;
+        return Ok(Some(
+            StatementData::new(
+                Statement::WhileBlock(self.statement.take().unwrap()),
+                self.pos
+            )
+        ));
     }
 }

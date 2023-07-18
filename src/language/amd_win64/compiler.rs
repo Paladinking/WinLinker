@@ -1,5 +1,6 @@
 use std::collections::{HashMap};
 use std::rc::Rc;
+use std::slice::Iter;
 use crate::language::amd_win64::operation::IdTracker;
 use crate::language::amd_win64::usages::{UsageTracker, UsedAfter};
 use super::instruction::InstructionCompiler;
@@ -7,7 +8,7 @@ use super::operation::{Operand, OperandSize, Operation, OperationType};
 use super::registers::*;
 use crate::language::operator::{DualOperator, SingleOperator};
 use crate::language::parser::{Expression, ExpressionData, Variable};
-use crate::language::parser::statement::{IfStatement, Statement, StatementData};
+use crate::language::parser::statement::{IfStatement, Statement, StatementData, WhileStatement};
 use crate::language::types::Type;
 
 #[derive(Debug)]
@@ -34,6 +35,53 @@ trait BlockCompiler<'a> {
 
     fn end<'b>(&'b mut self, builder : &mut InstructionBuilder) -> Option<std::slice::Iter<'a, StatementData>>;
 }
+
+struct WhileBlockBuilder<'a> {
+    statement : &'a WhileStatement,
+    block_id : usize,
+    label_locations : Vec<Option<usize>>,
+    label_queue : Vec<(usize, usize)>
+}
+
+impl <'a> WhileBlockBuilder<'a> {
+    fn new(builder : &mut InstructionBuilder, statement : &'a WhileStatement) -> Self {
+        let block_id = builder.block_tracker.get_id();
+        WhileBlockBuilder {
+            statement, block_id, label_locations : vec![None; 3], label_queue : Vec::new()
+        }
+    }
+}
+
+impl<'a> BlockCompiler<'a> for WhileBlockBuilder<'a> {
+    fn begin<'b>(&'b mut self, builder: &mut InstructionBuilder) -> Iter<'a, StatementData> {
+        builder.operations.push(OperationUnit::SyncPush(self.block_id));
+        self.label_locations[0] = Some(builder.operations.len());
+        builder.usage_tracker.enter_scope(self.block_id);
+        builder.operations.push(OperationUnit::EnterBlock(self.block_id));
+        builder.add_condition(&self.statement.condition, &mut self.label_locations,
+            &mut self.label_queue, 1, 2);
+        self.label_locations[1] = Some(builder.operations.len());
+        builder.operations.push(OperationUnit::SyncLoad);
+        return self.statement.block.iter();
+    }
+
+    fn end<'b>(&'b mut self, builder: &mut InstructionBuilder) -> Option<Iter<'a, StatementData>> {
+        builder.usage_tracker.leave_scope();
+        builder.operations.push(OperationUnit::LeaveBlock(false));
+        let jmp_dest = builder.create_operand(OperandSize::QWORD);
+        builder.add_operation(OperationType::Jmp, vec![jmp_dest], None);
+        self.label_queue.push((jmp_dest, 0));
+        self.label_locations[2] = Some(builder.operations.len());
+        builder.operations.push(OperationUnit::SyncLoad);
+        builder.operations.push(OperationUnit::SyncPop);
+        for &(o, index) in &self.label_queue {
+            let addr = self.label_locations[index].unwrap();
+            builder.register_state.allocate_addr(&builder.operands[o], addr);
+        }
+        return None;
+    }
+}
+
 
 struct IfBlockBuilder<'a> {
     statements : &'a Vec<IfStatement>,
@@ -67,91 +115,17 @@ impl <'a> IfBlockBuilder<'a> {
     }
 
     fn add_condition(&mut self, builder : &mut InstructionBuilder) {
-        let expr = if let Some(e) = &self.statements[self.index].condition { e } else { return; };
-        let location_offset = self.label_locations.len();
-        // Extend label_locations with jumps within expression
-        self.label_locations.resize(location_offset + expr.len(), None);
-        let mut stack = vec![(expr.len() - 1, None, Some(self.else_location()), self.block_location())];
-        while let Some((index, true_location, false_location, after)) = stack.pop() {
-            match &expr[index].expression {
-                Expression::Operator { operator : DualOperator::BoolAnd, first, second} => {
-                    stack.push((*second, true_location, false_location, after));
-                    stack.push((*first, None, Some(false_location.unwrap_or(after)), location_offset + *second));
-                },
-                Expression::Operator {operator : DualOperator::BoolOr, first, second} => {
-                    stack.push((*second, true_location, false_location, after));
-                    stack.push((*first, Some(true_location.unwrap_or(after)), None, location_offset + *second));
-                },
-                Expression::SingleOperator {operator : SingleOperator::Not, expr} => {
-                    stack.push((*expr, false_location, true_location, after));
-                },
-                e => {
-                    self.label_locations[index + location_offset] = Some(builder.operations.len());
-                    let jmp = match e {
-                        Expression::Variable(v) => {
-                            let im = builder.create_operand(OperandSize::from(v.var_type));
-                            builder.register_state.allocate_imm(&builder.operands[im], 0, OperandSize::from(v.var_type));
-                            builder.add_operation(OperationType::Cmp,
-                                                  vec![v.id.get().unwrap(), im], None);
-                            OperationType::JmpE
-                        }
-                        Expression::Operator { operator, first, second} => {
-                            let mut locations = Vec::new();
-                            let mut pos = *first;
-                            loop {
-                                match &expr[pos].expression {
-                                    Expression::Operator { first, .. } => pos = *first,
-                                    Expression::SingleOperator { expr, .. } => pos = *expr,
-                                    _ => break
-                                }
-                            }
-                            builder.add_expressions(&expr[pos..index], &mut locations, pos);
-                            let singed = || expr[*first].t.is_signed();
-                            builder.add_operation(
-                                OperationType::Cmp,
-                                vec![locations[*first - pos], locations[*second - pos]],
-                                None);
-                            match operator {
-                                DualOperator::Equal => OperationType::JmpE,
-                                DualOperator::NotEqual => OperationType::JmpNE,
-                                DualOperator::GreaterEqual => if singed() {OperationType::JmpGE} else {OperationType::JmpAE},
-                                DualOperator::LesserEqual => if singed() {OperationType::JmpLE} else {OperationType::JmpBE},
-                                DualOperator::Greater => if singed() {OperationType::JmpG} else {OperationType::JmpA},
-                                DualOperator::Lesser => if singed() {OperationType::JmpL} else {OperationType::JmpB},
-                                _ => panic!("Not a boolean operator")
-                            }
-                        },
-                        Expression::BoolLiteral(b) => {
-                            if *b {
-                                OperationType::Jmp
-                            } else {
-                                OperationType::JmpNop
-                            }
-                        }
-                        _ => panic!("Non boolean condition")
-                    };
-                    let jmp_dest = builder.create_operand(OperandSize::QWORD);
-                    if let Some(location) = true_location {
-                        self.label_queue.push((jmp_dest, location));
-                        builder.add_operation(jmp, vec![jmp_dest], None);
-                        if let Some(location) = false_location {
-                            let jmp_dest = builder.create_operand(OperandSize::QWORD);
-                            self.label_queue.push((jmp_dest, location));
-                            builder.add_operation(jmp.inverse(), vec![jmp_dest], None);
-                        }
-                    } else {
-                        let location = false_location.unwrap();
-                        self.label_queue.push((jmp_dest, location));
-                        builder.add_operation(jmp.inverse(), vec![jmp_dest], None);
-                    }
-                }
-            }
+        if let Some(expr) = &self.statements[self.index].condition {
+            let start = self.block_location();
+            let after = self.else_location();
+            builder.add_condition(expr, &mut self.label_locations, &mut self.label_queue,
+                                  start, after);
         }
     }
 }
 
 impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
-    fn begin<'b>(&'b mut self, builder : &mut InstructionBuilder) -> std::slice::Iter<'a, StatementData> {
+    fn begin<'b>(&'b mut self, builder : &mut InstructionBuilder) -> Iter<'a, StatementData> {
         self.label_locations[0] = Some(builder.operations.len());
         builder.operations.push(OperationUnit::SyncPush(self.block_ids[0]));
         self.add_condition(builder);
@@ -162,7 +136,7 @@ impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
         self.statements[0].block.iter()
     }
 
-    fn end<'b>(&'b mut self, builder : &mut InstructionBuilder) -> Option<std::slice::Iter<'a, StatementData>> {
+    fn end<'b>(&'b mut self, builder : &mut InstructionBuilder) -> Option<Iter<'a, StatementData>> {
         builder.operations.push(OperationUnit::LeaveBlock(self.index < self.statements.len() - 1));
         builder.usage_tracker.leave_scope();
         self.index += 1;
@@ -229,6 +203,89 @@ impl InstructionBuilder {
             operands, register_state, block_tracker, variable_count : vars.len()
         };
         builder
+    }
+
+    fn add_condition(&mut self, expr : &Vec<ExpressionData>, label_locations : &mut Vec<Option<usize>>,
+                     label_queue : &mut Vec<(usize, usize)>, start : usize, after : usize) {
+        let location_offset = label_locations.len();
+        // Extend label_locations with jumps within expression
+        label_locations.resize(location_offset + expr.len(), None);
+        let mut stack = vec![(expr.len() - 1, None, Some(after), start)];
+        while let Some((index, true_location, false_location, after)) = stack.pop() {
+            match &expr[index].expression {
+                Expression::Operator { operator : DualOperator::BoolAnd, first, second} => {
+                    stack.push((*second, true_location, false_location, after));
+                    stack.push((*first, None, Some(false_location.unwrap_or(after)), location_offset + *second));
+                },
+                Expression::Operator {operator : DualOperator::BoolOr, first, second} => {
+                    stack.push((*second, true_location, false_location, after));
+                    stack.push((*first, Some(true_location.unwrap_or(after)), None, location_offset + *second));
+                },
+                Expression::SingleOperator {operator : SingleOperator::Not, expr} => {
+                    stack.push((*expr, false_location, true_location, after));
+                },
+                e => {
+                    label_locations[index + location_offset] = Some(self.operations.len());
+                    let jmp = match e {
+                        Expression::Variable(v) => {
+                            let im = self.create_operand(OperandSize::from(v.var_type));
+                            self.register_state.allocate_imm(&self.operands[im], 0, OperandSize::from(v.var_type));
+                            self.add_operation(OperationType::Cmp,
+                                               vec![v.id.get().unwrap(), im], None);
+                            OperationType::JmpE
+                        }
+                        Expression::Operator { operator, first, second} => {
+                            let mut locations = Vec::new();
+                            let mut pos = *first;
+                            loop {
+                                match &expr[pos].expression {
+                                    Expression::Operator { first, .. } => pos = *first,
+                                    Expression::SingleOperator { expr, .. } => pos = *expr,
+                                    _ => break
+                                }
+                            }
+                            self.add_expressions(&expr[pos..index], &mut locations, pos);
+                            let singed = || expr[*first].t.is_signed();
+                            self.add_operation(
+                                OperationType::Cmp,
+                                vec![locations[*first - pos], locations[*second - pos]],
+                                None);
+                            match operator {
+                                DualOperator::Equal => OperationType::JmpE,
+                                DualOperator::NotEqual => OperationType::JmpNE,
+                                DualOperator::GreaterEqual => if singed() {OperationType::JmpGE} else {OperationType::JmpAE},
+                                DualOperator::LesserEqual => if singed() {OperationType::JmpLE} else {OperationType::JmpBE},
+                                DualOperator::Greater => if singed() {OperationType::JmpG} else {OperationType::JmpA},
+                                DualOperator::Lesser => if singed() {OperationType::JmpL} else {OperationType::JmpB},
+                                _ => panic!("Not a boolean operator")
+                            }
+                        },
+                        Expression::BoolLiteral(b) => {
+                            if *b {
+                                OperationType::Jmp
+                            } else {
+                                OperationType::JmpNop
+                            }
+                        }
+                        _ => panic!("Non boolean condition")
+                    };
+                    let jmp_dest = self.create_operand(OperandSize::QWORD);
+                    if let Some(location) = true_location {
+                        label_queue.push((jmp_dest, location));
+                        self.add_operation(jmp, vec![jmp_dest], None);
+                        if let Some(location) = false_location {
+                            let jmp_dest = self.create_operand(OperandSize::QWORD);
+                            label_queue.push((jmp_dest, location));
+                            self.add_operation(jmp.inverse(), vec![jmp_dest], None);
+                        }
+                    } else {
+                        let location = false_location.unwrap();
+                        label_queue.push((jmp_dest, location));
+                        self.add_operation(jmp.inverse(), vec![jmp_dest], None);
+                    }
+                }
+            }
+        }
     }
 
     fn add_operation(&mut self, operation : OperationType, operands : Vec<usize>, dest : Option<usize>) {
@@ -386,6 +443,14 @@ impl InstructionBuilder {
                     Statement::IfBlock(if_statement) => {
                         let mut builder : Box<dyn BlockCompiler> = Box::new(
                             IfBlockBuilder::new(&mut self, if_statement)
+                        );
+                        let iter = builder.begin(&mut self);
+                        statement_stack.push(iter);
+                        builder_stack.push(builder);
+                    },
+                    Statement::WhileBlock(statement)  => {
+                        let mut builder : Box<dyn BlockCompiler> = Box::new(
+                            WhileBlockBuilder::new(&mut self, statement)
                         );
                         let iter = builder.begin(&mut self);
                         statement_stack.push(iter);

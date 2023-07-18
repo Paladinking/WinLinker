@@ -186,7 +186,7 @@ impl From<Type> for OperandSize {
             Type::U32 | Type::S32 => OperandSize::DWORD,
             Type::Bool => OperandSize::BYTE,
             Type::Plain { .. } => todo!("Not yet implemented"),
-            Type::AnyInt | Type::Any => panic!("Not proper type")
+            Type::AnyInt | Type::Any => panic!("Not proper type {}", t)
         }
     }
 }

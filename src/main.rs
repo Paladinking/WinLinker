@@ -9,6 +9,7 @@ mod language;
 
 fn main() -> Result<(), String> {
     let res = language::parse_and_compile("if_prog.txt")?;
+    std::fs::write("if_prog.bin", &res).map_err(|e| e.to_string())?;
     let obj  = portable_executable::CoffObject::amd_x64("if_prog.obj")
         .add_function(res, "main")
         .build();

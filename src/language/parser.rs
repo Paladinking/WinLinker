@@ -11,7 +11,7 @@ use crate::language::operator::{DualOperator, SingleOperator};
 use crate::language::parser::expression_builder::ExpressionBuilder;
 use crate::language::types::Type;
 use parse_error::{ParseError, ParseErrorType};
-use crate::language::parser::statement::{BlockParser, BlockStatementParser, IfBlockParser, Statement, StatementData};
+use crate::language::parser::statement::{BlockParser, BlockStatementParser, IfBlockParser, Statement, StatementData, WhileBlockParser};
 
 
 #[derive(Debug)]
@@ -94,7 +94,7 @@ struct Parser<'a> {
 
 impl <'a>Parser<'a> {
     const SPACES : [char; 4] = ['\t', '\n', '\r', ' '];
-    const KEYWORDS : [&'static str; 4] = ["start", "end", "if", "return"];
+    const KEYWORDS : [&'static str; 5] = ["start", "end", "if", "while", "return"];
 
     fn new(data : &'a str) -> Parser<'a> {
         let types = Type::create_primitives();
@@ -352,9 +352,10 @@ impl <'a>Parser<'a> {
                     let word = self.read_word()?;
                     match word {
                         "if" => {
-                            targets.push(
-                                IfBlockParser::begin_block(self, pos)?
-                            );
+                            targets.push(IfBlockParser::begin_block(self, pos)?);
+                        },
+                        "while" => {
+                            targets.push(WhileBlockParser::begin_block(self, pos)?);
                         },
                         "return" => {
                             let (row, col) = self.get_pos();
@@ -458,6 +459,9 @@ impl <'a>Parser<'a> {
                         }
                     }
                 },
+                Statement::WhileBlock(statement) => {
+                    validate_expression(&mut statement.condition, &Type::Bool)?;
+                }
                 Statement::Return(expr) => {
                     validate_expression(expr, &Type::U32)?;
                 }
