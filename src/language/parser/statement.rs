@@ -66,7 +66,7 @@ impl BlockStatementParser for BlockParser {
         Ok(())
     }
 
-    fn end_block(&mut self, parser: &mut Parser) -> Result<Option<StatementData>, ParseError> {
+    fn end_block(&mut self, _parser: &mut Parser) -> Result<Option<StatementData>, ParseError> {
         Ok(Some(StatementData::new(Statement::Block(
             std::mem::take(&mut self.statements),
         ), self.pos)))

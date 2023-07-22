@@ -98,8 +98,7 @@ impl <'a>Parser<'a> {
 
     fn new(data : &'a str) -> Parser<'a> {
         let types = Type::create_primitives();
-        let mut variables : HashMap<String, Rc<Variable>> = HashMap::new();
-        //variables.insert("exit_code".to_owned(), Rc::new(Variable::new(Type::U32)));
+        let variables : HashMap<String, Rc<Variable>> = HashMap::new();
         let chars = data.chars();
         Parser {
             chars,

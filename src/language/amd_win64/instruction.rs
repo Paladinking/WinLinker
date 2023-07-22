@@ -377,6 +377,10 @@ fn create_instruction_map() -> HashMap<Instruction, Vec<Mnemonic>> {
         Instruction::mnemonic(OperationType::Jmp, OperandSize::QWORD, &[OperandType::Reg]),
         vec![Opcode(0xE9), ModRm(4 << 3), RmReg]
     );
+    map.insert(
+        Instruction::mnemonic(OperationType::JmpNop, OperandSize::QWORD, &[OperandType::Addr]),
+        vec![]
+    );
 
     standard_instr(&mut map, OperationType::And, 0x20, 0x22, 0x80, 0x21, 0x23, 0x81, 4);
     standard_instr(&mut map, OperationType::Or, 0x08, 0x0A, 0x80, 0x09, 0x0B, 0x81, 1);

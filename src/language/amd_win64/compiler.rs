@@ -2,6 +2,7 @@ use std::collections::{HashMap};
 use std::rc::Rc;
 use std::slice::Iter;
 use crate::language::amd_win64::operation::IdTracker;
+use crate::language::amd_win64::program_flow::ProgramFlow;
 use crate::language::amd_win64::usages::{UsageTracker, UsedAfter};
 use super::instruction::InstructionCompiler;
 use super::operation::{Operand, OperandSize, Operation, OperationType};
@@ -54,6 +55,7 @@ impl <'a> WhileBlockBuilder<'a> {
 
 impl<'a> BlockCompiler<'a> for WhileBlockBuilder<'a> {
     fn begin<'b>(&'b mut self, builder: &mut InstructionBuilder) -> Iter<'a, StatementData> {
+        builder.program_flow.add_new(self.block_id, builder.operations.len());
         builder.operations.push(OperationUnit::SyncPush(self.block_id));
         self.label_locations[0] = Some(builder.operations.len());
         builder.usage_tracker.enter_scope(self.block_id);
@@ -61,6 +63,7 @@ impl<'a> BlockCompiler<'a> for WhileBlockBuilder<'a> {
         builder.add_condition(&self.statement.condition, &mut self.label_locations,
             &mut self.label_queue, 1, 2);
         self.label_locations[1] = Some(builder.operations.len());
+        builder.program_flow.add_new(builder.block_tracker.get_id(), builder.operations.len());
         builder.operations.push(OperationUnit::SyncLoad);
         return self.statement.block.iter();
     }
@@ -78,6 +81,8 @@ impl<'a> BlockCompiler<'a> for WhileBlockBuilder<'a> {
             let addr = self.label_locations[index].unwrap();
             builder.register_state.allocate_addr(&builder.operands[o], addr);
         }
+        builder.program_flow.re_add(self.block_id);
+        builder.program_flow.add_new(builder.block_tracker.get_id(), builder.operations.len());
         return None;
     }
 }
@@ -120,12 +125,15 @@ impl <'a> IfBlockBuilder<'a> {
             let after = self.else_location();
             builder.add_condition(expr, &mut self.label_locations, &mut self.label_queue,
                                   start, after);
+            builder.program_flow.add_new(builder.block_tracker.get_id(),
+                                         builder.operations.len());
         }
     }
 }
 
 impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
     fn begin<'b>(&'b mut self, builder : &mut InstructionBuilder) -> Iter<'a, StatementData> {
+        builder.program_flow.add_new(self.block_ids[0], builder.operations.len());
         self.label_locations[0] = Some(builder.operations.len());
         builder.operations.push(OperationUnit::SyncPush(self.block_ids[0]));
         self.add_condition(builder);
@@ -141,7 +149,10 @@ impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
         builder.usage_tracker.leave_scope();
         self.index += 1;
         if let Some(s) = self.statements.get(self.index) {
+            builder.program_flow.re_open(self.block_ids[self.index - 1]);
             self.block_ids[self.index] = builder.block_tracker.get_id();
+            builder.program_flow.add_new(self.block_ids[self.index],
+                                         builder.operations.len());
             // Add jump to end of scope
             let jmp_dest = builder.create_operand(OperandSize::QWORD);
             self.label_queue.push((jmp_dest, self.statements.len() * 2));
@@ -168,6 +179,8 @@ impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
                 let addr = self.label_locations[index].unwrap();
                 builder.register_state.allocate_addr(&builder.operands[o], addr);
             }
+            builder.program_flow.merge(self.statements.len());
+            builder.program_flow.add_new(builder.block_tracker.get_id(), builder.operations.len());
             None
         }
     }
@@ -184,6 +197,7 @@ pub struct AddressRelocation {
 pub struct InstructionBuilder {
     operations: Vec<OperationUnit>,
     usage_tracker : UsageTracker,
+    program_flow : ProgramFlow,
     operands : Vec<Operand>,
     variable_count : usize,
     register_state : RegisterState,
@@ -199,6 +213,7 @@ impl InstructionBuilder {
             Operand::new(OperandSize::from(v.var_type))
         }).collect();
         let builder = InstructionBuilder {
+            program_flow : ProgramFlow::new(),
             operations: Vec::new(), usage_tracker : UsageTracker::new(),
             operands, register_state, block_tracker, variable_count : vars.len()
         };
@@ -429,6 +444,7 @@ impl InstructionBuilder {
         let mut statement_stack = vec![statements.iter()];
         let mut builder_stack = Vec::new();
         let outer_scope_id = self.block_tracker.get_id();
+        self.program_flow.add_root(outer_scope_id, 0);
         self.operations.push(OperationUnit::SyncPush(outer_scope_id));
         self.operations.push(OperationUnit::EnterBlock(outer_scope_id));
         self.usage_tracker.enter_scope(outer_scope_id);
@@ -465,6 +481,8 @@ impl InstructionBuilder {
                         let jmp_ret = self.create_operand(OperandSize::QWORD);
                         self.add_operation(OperationType::Jmp, vec![jmp_ret], None);
                         return_addr_list.push(jmp_ret);
+                        self.program_flow.end();
+                        self.program_flow.add_new(self.block_tracker.get_id(), self.operations.len());
                     },
                     Statement::Block(_) => todo!()
                 }
@@ -502,6 +520,10 @@ impl InstructionBuilder {
 
         self.usage_tracker.leave_scope();
         self.usage_tracker.finalize(&mut self.operations, self.variable_count);
+        self.program_flow.print();
+        for (index, op) in self.operations.iter().enumerate() {
+            println!("{}: {:?}", index, op);
+        }
         self
     }
 

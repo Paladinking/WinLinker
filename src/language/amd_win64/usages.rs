@@ -15,13 +15,12 @@ impl ScopeBlock {
 
 struct Scope {
     block_id : usize,
-    last_child : usize,
     freed_variables : Vec<usize>
 }
 
 impl Scope {
-    fn new(block_id : usize,  last_child : usize) -> Scope {
-        Scope {block_id, last_child, freed_variables : Vec::new()}
+    fn new(block_id : usize) -> Scope {
+        Scope {block_id, freed_variables : Vec::new()}
     }
 }
 
@@ -47,7 +46,6 @@ pub enum UsedAfter {
 }
 
 pub struct UsageTracker {
-    scope_ids : Vec<usize>,
     first_scope_ids : Vec<usize>,
     //usage_queue : HashMap<usize, Vec<UsageNode>>,
     // <first_scope_id, Vec<(scope-id, scope-row)>>
@@ -59,44 +57,34 @@ pub struct UsageTracker {
     used_operands : HashMap<usize, usize>,
     // Same len as operations, all invalidations of dest until next free.
     invalidations: Vec<u64>,
-    variable_invalidations : HashMap<usize, u64>,
-    outer_scope : usize
+    variable_invalidations : HashMap<usize, u64>
 }
 
 impl UsageTracker {
     pub fn new() -> UsageTracker {
         UsageTracker {
-            scope_ids : Vec::new(), first_scope_ids : Vec::new(),
+            first_scope_ids : Vec::new(),
             usages : HashMap::new(), scopes : HashMap::new(), scope_blocks : HashMap::new(),
-            used_operands : HashMap::new(), outer_scope : 0,
+            used_operands : HashMap::new(),
             invalidations : Vec::new(), variable_invalidations : HashMap::new()
         }
     }
 
     pub fn enter_scope(&mut self, scope_id : usize) {
         self.first_scope_ids.push(scope_id);
-        self.scope_ids.push(scope_id);
         self.scopes.entry(scope_id).or_insert_with(||
-            Scope::new(scope_id, scope_id));
+            Scope::new(scope_id));
         self.scope_blocks.entry(scope_id).or_insert_with(||
             ScopeBlock::new(vec![scope_id]));
     }
 
     pub fn leave_scope(&mut self) {
-        let id = self.scope_ids.pop().unwrap();
         self.first_scope_ids.pop().unwrap();
-        if let Some(scope) = self.scope_ids.last() {
-            self.scopes.get_mut(scope).unwrap().last_child = id;
-        } else {
-            self.outer_scope = id;
-        }
     }
 
     pub fn alt_scope(&mut self, scope_id : usize, condition : bool) {
         let first_scope_id = *self.first_scope_ids.last().unwrap();
-        *self.scope_ids.last_mut().unwrap() = scope_id;
-        self.scopes.insert(scope_id,Scope::new(
-            first_scope_id, scope_id));
+        self.scopes.insert(scope_id,Scope::new(first_scope_id));
         self.scope_blocks.get_mut(&first_scope_id).unwrap().scopes.push(scope_id);
         if !condition {
             self.scope_blocks.get_mut(&first_scope_id).unwrap().conditional = false;
@@ -205,7 +193,7 @@ impl UsageTracker {
     pub fn finalize(&mut self, operations : &Vec<OperationUnit>, variable_count : usize) {
         self.invalidations.resize(operations.len(), 0);
         debug_assert!(self.first_scope_ids.is_empty());
-        let mut scopes = Vec::with_capacity(self.scope_ids.capacity());
+        let mut scopes = Vec::new();
         for (index, operation) in operations.iter().enumerate() {
             match operation {
                 OperationUnit::Operation(operation) => {
