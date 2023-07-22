@@ -29,6 +29,13 @@ impl OperationUnit {
         }
         return None;
     }
+
+    pub fn invalidations(&self) -> u64 {
+        match self {
+            OperationUnit::Operation(op) => op.invalidations,
+            _ => 0
+        }
+    }
 }
 
 trait BlockCompiler<'a> {
@@ -179,7 +186,7 @@ impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
                 let addr = self.label_locations[index].unwrap();
                 builder.register_state.allocate_addr(&builder.operands[o], addr);
             }
-            builder.program_flow.merge(self.statements.len());
+            builder.program_flow.merge(self.statements.len(), self.block_ids[0]);
             builder.program_flow.add_new(builder.block_tracker.get_id(), builder.operations.len());
             None
         }
@@ -213,7 +220,7 @@ impl InstructionBuilder {
             Operand::new(OperandSize::from(v.var_type))
         }).collect();
         let builder = InstructionBuilder {
-            program_flow : ProgramFlow::new(),
+            program_flow : ProgramFlow::new(vars.len()),
             operations: Vec::new(), usage_tracker : UsageTracker::new(),
             operands, register_state, block_tracker, variable_count : vars.len()
         };
@@ -520,6 +527,8 @@ impl InstructionBuilder {
 
         self.usage_tracker.leave_scope();
         self.usage_tracker.finalize(&mut self.operations, self.variable_count);
+        let row = self.operations.len();
+        self.program_flow.finalize(&mut self.operations, self.variable_count, row);
         self.program_flow.print();
         for (index, op) in self.operations.iter().enumerate() {
             println!("{}: {:?}", index, op);
