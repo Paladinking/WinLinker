@@ -212,7 +212,8 @@ pub struct Operand {
     pub allocation: Cell<usize>, // Index of allocated MemoryLocation
     pub size : OperandSize,
     pub hint : u64,
-    pub home : Option<usize>
+    pub home : Option<usize>,
+    pub last_use : Option<usize>
 }
 
 
@@ -222,12 +223,14 @@ impl Operand {
             allocation: Cell::new(0),
             size,
             hint : u64::MAX, // Full bitmap to allow bitwise and
-            home : None
+            home : None,
+            last_use : None
         }
     }
 
     pub(crate) fn merge_into(&self, other: &Operand) {
         other.allocation.replace(self.allocation.get());
+        self.allocation.replace(0);
     }
 }
 

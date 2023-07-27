@@ -497,7 +497,7 @@ impl RegisterState {
         }
     }
 
-    pub fn enter_block(&mut self, operands : &Vec<Operand>) {
+    pub fn update_state(&mut self, operands : &Vec<Operand>) {
         let mut saved = self.saved_variables.pop().unwrap();
         // Operands can be freed between load_state and enter_block if they
         //  are freed in e.g a condition. In that case the operand does not
@@ -528,6 +528,18 @@ impl RegisterState {
                 if let MemoryAllocation::Register(reg, _) = &self.allocations[index] {
                     self.registers[*reg].operand.replace(index);
                 }
+            }
+        }
+        self.saved_variables.push(to_restore);
+    }
+
+    pub fn sync_state(&mut self, operands : &Vec<Operand>) {
+        let to_restore = self.saved_variables.pop().unwrap();
+        for (&id, (allocation, _ )) in &to_restore {
+            let cur_allocation = operands[id].allocation.get();
+            if !self.is_free(&operands[id]) && self.allocations[cur_allocation].ne(allocation) {
+                println!("Restore {}, {}, {}", id, self.allocation_string(&self.allocations[cur_allocation]), self.allocation_string(&allocation));
+                self.restore_allocation(cur_allocation, allocation);
             }
         }
         self.saved_variables.push(to_restore);
@@ -585,18 +597,4 @@ impl RegisterState {
             _ => panic!("Invalid location")
         }
     }
-
-    pub fn leave_block(&mut self, operands : &Vec<Operand>, _has_next : bool) {
-        let to_restore = self.saved_variables.pop().unwrap();
-        for (&id, (allocation, _ )) in &to_restore {
-            let cur_allocation = operands[id].allocation.get();
-            if !self.is_free(&operands[id]) && self.allocations[cur_allocation].ne(allocation) {
-                self.restore_allocation(cur_allocation, allocation);
-            }
-        }
-        self.saved_variables.push(to_restore);
-    }
-
-
-
 }

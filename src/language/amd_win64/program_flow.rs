@@ -1,14 +1,14 @@
 use std::collections::{HashMap, HashSet};
-use std::ops::Range;
+use std::ops::{BitAnd, Range};
 use std::ptr;
 use crate::language::amd_win64::compiler::OperationUnit;
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub enum Usage {
-    Use, Redefine, UseAndRedefine
+    Use, Redefine
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Needed {
     Value, Location, None
 }
@@ -16,18 +16,21 @@ pub enum Needed {
 struct Node {
     parents : Vec<*mut Node>,
     children : Vec<*mut Node>,
-    looping : Option<*mut Node>,
     duration : Range<usize>,
-    initialized_variables : Vec<usize>,
-    freed_variables : Vec<usize>,
+
+    live_in : HashSet<usize>,
+    live_out : HashSet<usize>,
+
+    gen : HashSet<usize>,
+    kill : HashSet<usize>,
 }
 
 impl Node {
     unsafe fn new(mut parents : Vec<*mut Node>, start: usize) -> *mut Node {
         let new = Box::into_raw(Box::new(Node {
             parents, children : Vec::new(), duration : start..start,
-            looping : None, initialized_variables : Vec::new(),
-            freed_variables : Vec::new()
+            live_in : HashSet::new(), live_out : HashSet::new(),
+            gen : HashSet::new(), kill : HashSet::new()
         }));
         for &node in &(*new).parents {
             (*node).children.push(new);
@@ -35,6 +38,11 @@ impl Node {
         return new;
     }
 }
+
+pub struct InterferenceGraph {
+    nodes : Vec<>
+}
+
 // ADD(new_child): Add top of open as parents to new node, replace with new child
 // BACK(parent): Add parent to open
 // CLOSE(n): merge the last n in open
@@ -43,7 +51,7 @@ impl Node {
 // END: replace top of open with ()
 
 // a = 10;           <-- |Node 1, children[2], parents[]          ADD, open[(root)] => open[(1)]
-// b = 5;
+// b = 5;                |
 // if a > 5 {        <-- Node 2, children[3, 4], parents[1]       ADD, open[(1)] => open[(2)]
 //      b = 20;      <-- Node 3, children[9], parents[2]          ADD, BACK, open[(2)] => open[(3)] => open[(3), (2)]
 // } else if a < 5 { <-- Node 4, children[5, 9], parents[2]       ADD, open[(3), (2)] => open[(3), (4)]
@@ -71,16 +79,8 @@ pub struct ProgramFlow {
     nodes : Vec<*mut Node>,
     open : Vec<Vec<*mut Node>>,
     current_node : *mut Node,
-
-    initialized: Vec<bool>,
-    variable_invalidations: Vec<u64>,
-    // (operand-id, row)
-    usages: HashMap<(usize, usize), Usage>,
-    // (row, index)(dest=0, operand=1+)
-    needed: HashMap<(usize, usize), Needed>,
-    invalidations : Vec<u64>,
-
-    root_id : usize
+    root_id : usize,
+    exit_points : Vec<*mut Node>
 }
 
 impl ProgramFlow {
@@ -88,12 +88,7 @@ impl ProgramFlow {
         ProgramFlow {
             nodes : Vec::new(),
             open : vec![], current_node : ptr::null_mut(),
-            initialized : vec![false; variable_count],
-            usages : HashMap::new(),
-            needed : HashMap::new(),
-            invalidations : Vec::new(),
-            variable_invalidations : Vec::with_capacity(variable_count),
-            root_id : 0
+            root_id : 0, exit_points : Vec::new()
         }
     }
 
@@ -106,15 +101,12 @@ impl ProgramFlow {
     }
 
     pub fn add_root(&mut self, id : usize, row : usize) {
-        print!("Add root {}, {:?} => ", id, &self.open);
         debug_assert!(self.open.is_empty());
         self.add_node(id, row, Vec::new());
         self.root_id = id;
-        println!(" {:?}", &self.open);
     }
 
     pub fn add_new(&mut self, id : usize, row : usize) {
-        print!("Add new {}, {:?} => ", id, &self.open);
         // Should be true, probably not necessary though.
         //debug_assert!(self.open.last().unwrap().len() <= 1);
         // Needs to be true.
@@ -122,18 +114,14 @@ impl ProgramFlow {
         unsafe {(*self.current_node).duration.end = row};
         let parents = self.open.pop().unwrap();
         self.add_node(id, row, parents);
-        println!(" {:?}", &self.open);
     }
 
     pub fn re_open(&mut self, id : usize) {
-        print!("Reopen {}, {:?} => ", id, &self.open);
         let node = *self.nodes.get(id).unwrap();
         self.open.push(vec![node]);
-        println!(" {:?}", &self.open);
     }
 
-    pub fn merge(&mut self, n : usize, root : usize) {
-        print!("Merge {}, {:?} => ", n, &self.open);
+    pub fn merge(&mut self, n : usize, _root : usize) {
         debug_assert!(self.open.len() >= n);
         debug_assert!(self.open.last().unwrap().len() == 1);
         let target = self.open.len() - n;
@@ -141,191 +129,111 @@ impl ProgramFlow {
             let mut others = self.open.pop().unwrap();
             self.open[target].append(&mut others);
         }
-        let root = *self.nodes.get(root).unwrap();
-        unsafe {
-            let mut stack = (*root).children.clone();
-            while let Some(node) = stack.pop() {
-                (*root).initialized_variables.extend_from_slice(
-                    &std::mem::take(&mut (*node).initialized_variables)
-                );
-                stack.extend_from_slice(&(*node).children);
-            }
-        }
-        println!(" {:?}", &self.open);
     }
 
     pub fn insert_open(&mut self, id : usize) {
-        print!("Insert Open {}, {:?} => ", id, &self.open);
         self.open.last_mut().unwrap().push(*self.nodes.get(id).unwrap());
-        println!(" {:?}", &self.open);
     }
 
     pub fn re_add(&mut self, id : usize) {
-        print!("Readd {}, {:?} => ", id, &self.open);
         let node = *self.nodes.get(id).unwrap();
         let last_open = self.open.last_mut().unwrap();
         unsafe {
             for &open in last_open.iter() {
-                (*open).looping.replace(node);
+                (*open).children.push(node);
             }
+            (*node).parents.extend_from_slice(&last_open);
         }
+        last_open.clear();
         last_open.push(node);
-        println!(" {:?}", &self.open);
     }
 
     pub fn end(&mut self) {
-        print!("End, {:?} => ", &self.open);
         self.open.last_mut().unwrap().clear();
-        println!(" {:?}", &self.open);
+        self.exit_points.push(self.current_node);
     }
 
     pub fn add_usage(&mut self, id : usize, row : usize, usage : Usage) {
         assert!(!self.current_node.is_null());
-        self.usages.entry((id, row))
-            .and_modify(|e| *e = Usage::UseAndRedefine)
-            .or_insert(usage);
-        if !self.initialized[id] {
-            unsafe {
-                (*self.current_node).initialized_variables.push(id);
-            }
-            self.initialized[id] = true;
-        }
-    }
-
-    unsafe fn analyze_usage(&self, id : usize, operations : &Vec<OperationUnit>, mut row: usize, mut node: *mut Node) -> (Needed, u64) {
-        let mut to_visit = vec![];
-        let mut needed = false;
-        let mut used = false;
-
-        let mut local_invalidations = 0;
-        let mut invalidations = 0;
-        let mut taken_loops = HashSet::new();
-
-        'nodes: loop {
-            let mut found = false;
-            for i in row..(*node).duration.end {
-                if let Some(&usage) = self.usages.get(&(id, i)) {
-                    if usage != Usage::Redefine {
-                        needed = needed || !found;
-                        invalidations |= local_invalidations;
-                    }
-                    if usage != Usage::Use {
-                        if let Some(new) = to_visit.pop() {
-                            node = new;
-                            row = (*node).duration.start;
-                            continue 'nodes;
-                        } else {
-                            break 'nodes;
-                        }
-                    }
-                    found = true;
-                    used = true;
+        unsafe {
+            if usage == Usage::Use {
+                if !(*self.current_node).kill.contains(&id) {
+                    (*self.current_node).gen.insert(id);
                 }
-                local_invalidations |= operations[i].invalidations();
-            }
-            to_visit.extend_from_slice(&(*node).children);
-            if let Some(n) = (*node).looping {
-                if taken_loops.insert(n) {
-                    to_visit.push(n);
-                }
-            }
-            if let Some(new) = to_visit.pop() {
-                node = new;
-                row = (*node).duration.start;
             } else {
-                break;
+                (*self.current_node).kill.insert(id);
             }
         }
-        return (match (needed, used) {
-            (true, _) => Needed::Value,
-            (false, true) => Needed::Location,
-            (false, false) => Needed::None
-        }, invalidations);
     }
 
-    pub fn finalize(&mut self, operations : &Vec<OperationUnit>, variable_count : usize, row : usize) {
-        let mut cur_node = 0;
-        self.invalidations.resize(operations.len(), 0);
-        self.variable_invalidations.resize(variable_count, 0);
+    unsafe fn finalize_internal(&mut self) {
+        let mut node_stack = std::mem::take(&mut self.exit_points);
+        while let Some(node) = node_stack.pop() {
+            (*node).live_out = (*node).children.iter().flat_map(
+                |&child| (*child).live_in.iter().cloned()
+            ).collect();
+            let new_in = (*node).gen.iter().chain(
+                (*node).live_out.difference(&(*node).kill)
+            ).cloned().collect();
+            if new_in != (*node).live_in {
+                (*node).live_in = new_in;
+                node_stack.extend_from_slice(&(*node).parents);
+            }
+        }
+    }
+
+    pub fn finalize(&mut self, row: usize) {
         unsafe {
             (*self.current_node).duration.end = row;
-            for (index, op) in operations.iter().enumerate() {
-                while index == (*self.nodes[cur_node]).duration.end {
-                    cur_node += 1;
-                    debug_assert!(index == (*self.nodes[cur_node]).duration.start);
-                    if index != (*self.nodes[cur_node]).duration.end {
-                        for operand in 0..variable_count {
-                            let (needed, _) = self.analyze_usage(operand, operations,
-                                                                 index, self.nodes[cur_node]);
-                            if needed != Needed::Value {
-                                (*self.nodes[cur_node]).freed_variables.push(operand);
-                            }
-                        }
-                    }
-                }
-                if let OperationUnit::Operation(operation) = op {
-                    if let Some(dest) = operation.dest {
-                        if dest < variable_count {
-                            let (needed, invalidations) = self.analyze_usage(
-                                dest, operations, index + 1, self.nodes[cur_node]
-                            );
-                            self.needed.insert((index, 0), needed);
-                            self.invalidations[index] = invalidations;
-                            self.variable_invalidations[dest] |= invalidations;
-                        }
-                    }
-                    for (i, &operand) in operation.operands.iter().enumerate() {
-                        if operand < variable_count {
-                            let (needed, invalidations) = self.analyze_usage(
-                                operand, operations, index + 1, self.nodes[cur_node]
-                            );
-                            self.needed.insert((index, 1 + i), needed);
-                            self.variable_invalidations[operand] |= invalidations;
-                        }
-                    }
-                }
-            }
+            self.finalize_internal();
         }
     }
 
     pub fn print(&self) {
         unsafe {
-            for (k, &n) in self.nodes.iter().enumerate() {
-                let parents = (*n).parents.iter().map(
-                    |&ptr| self.nodes.iter().enumerate().find_map(
-                        |(key, &node)| if node == ptr {Some(key)} else {None}
-                    ).unwrap()
+            for (i, &node) in self.nodes.iter().enumerate() {
+                println!("Node {}: ", i);
+                let children = (*node).children.iter().map(
+                    |&child| self.nodes.iter().enumerate()
+                        .find_map(|(i, &n)| if child == n {Some(i)} else {None}).unwrap()
                 ).collect::<Vec<_>>();
-                let children = (*n).children.iter().map(
-                    |&ptr| self.nodes.iter().enumerate().find_map(
-                        |(key, &node)| if node == ptr {Some(key)} else {None}
-                    ).unwrap()
+                let parents = (*node).parents.iter().map(
+                    |&child| self.nodes.iter().enumerate()
+                        .find_map(|(i, &n)| if child == n {Some(i)} else {None}).unwrap()
                 ).collect::<Vec<_>>();
-                print!("Node {}:", k);
-                println!(" {}..{}, {:?}, {:?}", (*n).duration.start, (*n).duration.end, parents, children);
+                println!("\tChildren: {:?}", children);
+                println!("\tParents: {:?}", parents);
+                println!("\tLive_in: {:?}", (*node).live_in);
+                println!("\tLive_out: {:?}", (*node).live_out);
+                println!("\tGen: {:?}", (*node).gen);
+                println!("\tKill: {:?}", (*node).kill);
+
             }
         }
     }
 
     pub fn get_initializations(&self, node_id : usize) -> impl Iterator<Item=&usize> {
-        return unsafe {(*self.nodes[node_id]).initialized_variables.iter()};
+        return [].iter();
     }
 
     pub fn get_frees(&self, node_id : usize) -> impl Iterator<Item=&usize> {
-        return unsafe {(*self.nodes[node_id]).freed_variables.iter()};
+        return [].iter();
     }
 
 
     pub fn used_after(&self, index : usize, row : usize) -> Needed {
-        return self.needed.get(&(index, row)).cloned().unwrap_or(Needed::None);
+        return Needed::None;
+        //return self.needed.get(&(row, index)).cloned().unwrap_or(Needed::None);
     }
 
     pub fn row_invalidations(&self, row : usize) -> u64 {
-        return self.invalidations[row];
+        return 0;
+        //return self.invalidations[row];
     }
 
     pub fn variable_invalidations(&self, id : usize) -> u64 {
-        return self.variable_invalidations[id];
+        return 0;
+        //return self.variable_invalidations[id];
     }
 }
 

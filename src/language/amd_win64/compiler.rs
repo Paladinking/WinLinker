@@ -2,8 +2,7 @@ use std::collections::{HashMap};
 use std::rc::Rc;
 use std::slice::Iter;
 use crate::language::amd_win64::operation::IdTracker;
-use crate::language::amd_win64::program_flow::ProgramFlow;
-use crate::language::amd_win64::usages::{UsageTracker, UsedAfter};
+use crate::language::amd_win64::program_flow::{Needed, ProgramFlow, Usage};
 use super::instruction::InstructionCompiler;
 use super::operation::{Operand, OperandSize, Operation, OperationType};
 use super::registers::*;
@@ -12,14 +11,23 @@ use crate::language::parser::{Expression, ExpressionData, Variable};
 use crate::language::parser::statement::{IfStatement, Statement, StatementData, WhileStatement};
 use crate::language::types::Type;
 
+mod node_flag {
+    pub const SYNC_PUSH : u8 = 0x1;
+    pub const SYNC_LOAD : u8 = 0x2;
+    pub const SYNC_POP : u8 = 0x4;
+    pub const SYNC_UPDATE : u8 = 0x8;
+    pub const SYNC_FIX : u8 = 0x10;
+}
+
 #[derive(Debug)]
 pub enum OperationUnit {
+    Node(u8, usize),
     Operation(Operation), // Real operation
-    EnterBlock(usize),
+    /*EnterBlock(usize),
     LeaveBlock(bool),
     SyncPush(usize),
     SyncLoad,
-    SyncPop
+    SyncPop*/
 }
 
 impl OperationUnit {
@@ -62,34 +70,35 @@ impl <'a> WhileBlockBuilder<'a> {
 
 impl<'a> BlockCompiler<'a> for WhileBlockBuilder<'a> {
     fn begin<'b>(&'b mut self, builder: &mut InstructionBuilder) -> Iter<'a, StatementData> {
-        builder.program_flow.add_new(self.block_id, builder.operations.len());
-        builder.operations.push(OperationUnit::SyncPush(self.block_id));
+        builder.operations.push(OperationUnit::Node(
+            node_flag::SYNC_PUSH, self.block_id));
+        builder.program_flow.add_new(self.block_id, builder.operations.len() - 1);
         self.label_locations[0] = Some(builder.operations.len());
-        builder.usage_tracker.enter_scope(self.block_id);
-        builder.operations.push(OperationUnit::EnterBlock(self.block_id));
+
         builder.add_condition(&self.statement.condition, &mut self.label_locations,
             &mut self.label_queue, 1, 2);
         self.label_locations[1] = Some(builder.operations.len());
-        builder.program_flow.add_new(builder.block_tracker.get_id(), builder.operations.len());
-        builder.operations.push(OperationUnit::SyncLoad);
+        let next_id = builder.block_tracker.get_id();
+        builder.operations.push(OperationUnit::Node(node_flag::SYNC_LOAD, next_id));
+        builder.program_flow.add_new(next_id, builder.operations.len() - 1);
         return self.statement.block.iter();
     }
 
     fn end<'b>(&'b mut self, builder: &mut InstructionBuilder) -> Option<Iter<'a, StatementData>> {
-        builder.usage_tracker.leave_scope();
-        builder.operations.push(OperationUnit::LeaveBlock(false));
         let jmp_dest = builder.create_operand(OperandSize::QWORD);
         builder.add_operation(OperationType::Jmp, vec![jmp_dest], None);
-        self.label_queue.push((jmp_dest, 0));
         self.label_locations[2] = Some(builder.operations.len());
-        builder.operations.push(OperationUnit::SyncLoad);
-        builder.operations.push(OperationUnit::SyncPop);
+        self.label_queue.push((jmp_dest, 0));
         for &(o, index) in &self.label_queue {
             let addr = self.label_locations[index].unwrap();
             builder.register_state.allocate_addr(&builder.operands[o], addr);
         }
+
         builder.program_flow.re_add(self.block_id);
-        builder.program_flow.add_new(builder.block_tracker.get_id(), builder.operations.len());
+        let next_id = builder.block_tracker.get_id();
+        builder.operations.push(OperationUnit::Node(
+            node_flag::SYNC_FIX | node_flag::SYNC_LOAD | node_flag::SYNC_POP, next_id));
+        builder.program_flow.add_new(next_id, builder.operations.len() - 1);
         return None;
     }
 }
@@ -132,62 +141,66 @@ impl <'a> IfBlockBuilder<'a> {
             let after = self.else_location();
             builder.add_condition(expr, &mut self.label_locations, &mut self.label_queue,
                                   start, after);
-            builder.program_flow.add_new(builder.block_tracker.get_id(),
-                                         builder.operations.len());
+            let next_id = builder.block_tracker.get_id();
+            builder.operations.push(OperationUnit::Node(node_flag::SYNC_UPDATE, next_id));
+            builder.program_flow.add_new(next_id, builder.operations.len() - 1);
         }
     }
 }
 
 impl <'a> BlockCompiler<'a> for IfBlockBuilder<'a> {
     fn begin<'b>(&'b mut self, builder : &mut InstructionBuilder) -> Iter<'a, StatementData> {
-        builder.program_flow.add_new(self.block_ids[0], builder.operations.len());
         self.label_locations[0] = Some(builder.operations.len());
-        builder.operations.push(OperationUnit::SyncPush(self.block_ids[0]));
-        self.add_condition(builder);
-        self.label_locations[1] = Some(builder.operations.len());
-        builder.usage_tracker.enter_scope(self.block_ids[0]);
-        builder.operations.push(OperationUnit::EnterBlock(self.block_ids[0]));
+        builder.operations.push(OperationUnit::Node(
+            node_flag::SYNC_FIX | node_flag::SYNC_PUSH, self.block_ids[0]));
+        builder.program_flow.add_new(self.block_ids[0], builder.operations.len() - 1);
 
+        self.add_condition(builder);
+        self.label_locations[1] = Some(builder.operations.len() - 1);
         self.statements[0].block.iter()
     }
 
     fn end<'b>(&'b mut self, builder : &mut InstructionBuilder) -> Option<Iter<'a, StatementData>> {
-        builder.operations.push(OperationUnit::LeaveBlock(self.index < self.statements.len() - 1));
-        builder.usage_tracker.leave_scope();
         self.index += 1;
         if let Some(s) = self.statements.get(self.index) {
-            builder.program_flow.re_open(self.block_ids[self.index - 1]);
             self.block_ids[self.index] = builder.block_tracker.get_id();
-            builder.program_flow.add_new(self.block_ids[self.index],
-                                         builder.operations.len());
+            builder.program_flow.re_open(self.block_ids[self.index - 1]);
+
             // Add jump to end of scope
             let jmp_dest = builder.create_operand(OperandSize::QWORD);
             self.label_queue.push((jmp_dest, self.statements.len() * 2));
             builder.add_operation(OperationType::Jmp, vec![jmp_dest], None);
 
-            self.label_locations[self.index * 2].replace(builder.operations.len());
-            builder.operations.push(OperationUnit::SyncLoad);
+            builder.operations.push(OperationUnit::Node(
+                node_flag::SYNC_FIX | node_flag::SYNC_LOAD, self.block_ids[self.index]
+            ));
+            builder.program_flow.add_new(self.block_ids[self.index],
+                                         builder.operations.len() - 1);
+
+
+            self.label_locations[self.index * 2].replace(builder.operations.len() - 1);
             self.add_condition(builder);
-            self.label_locations[self.index * 2 + 1].replace(builder.operations.len());
-            builder.usage_tracker.enter_scope(self.block_ids[0]);
-            builder.usage_tracker.alt_scope(
-                self.block_ids[self.index],
-                self.statements[self.index].condition.is_some());
-            builder.operations.push(OperationUnit::EnterBlock(self.block_ids[self.index]));
+            self.label_locations[self.index * 2 + 1].replace(builder.operations.len() - 1);
             Some(s.block.iter())
         } else {
             self.label_locations[self.statements.len() * 2].replace(builder.operations.len());
-            if self.statements.last().unwrap().condition.is_some() {
-                // Sync only needed if program execution might not enter any case of if-statement.
-                builder.operations.push(OperationUnit::SyncLoad);
-            }
-            builder.operations.push(OperationUnit::SyncPop);
+            builder.program_flow.merge(self.statements.len(), self.block_ids[0]);
+            let flag = if self.statements.last().unwrap().condition.is_some() {
+                // SYNC_LOAD only needed if program execution might not enter any case of if-statement.
+                builder.program_flow.insert_open(self.block_ids[0]);
+                node_flag::SYNC_LOAD | node_flag::SYNC_POP
+            } else {
+                node_flag::SYNC_POP
+            };
+
             for &(o, index) in &self.label_queue {
                 let addr = self.label_locations[index].unwrap();
                 builder.register_state.allocate_addr(&builder.operands[o], addr);
             }
-            builder.program_flow.merge(self.statements.len(), self.block_ids[0]);
-            builder.program_flow.add_new(builder.block_tracker.get_id(), builder.operations.len());
+
+            let next_id = builder.block_tracker.get_id();
+            builder.operations.push(OperationUnit::Node(flag, next_id));
+            builder.program_flow.add_new(next_id, builder.operations.len() - 1);
             None
         }
     }
@@ -203,7 +216,6 @@ pub struct AddressRelocation {
 
 pub struct InstructionBuilder {
     operations: Vec<OperationUnit>,
-    usage_tracker : UsageTracker,
     program_flow : ProgramFlow,
     operands : Vec<Operand>,
     variable_count : usize,
@@ -221,7 +233,7 @@ impl InstructionBuilder {
         }).collect();
         let builder = InstructionBuilder {
             program_flow : ProgramFlow::new(vars.len()),
-            operations: Vec::new(), usage_tracker : UsageTracker::new(),
+            operations: Vec::new(),
             operands, register_state, block_tracker, variable_count : vars.len()
         };
         builder
@@ -313,21 +325,21 @@ impl InstructionBuilder {
     fn add_operation(&mut self, operation : OperationType, operands : Vec<usize>, dest : Option<usize>) {
         let mut size = OperandSize::QWORD;
         for (i, &operand) in operands.iter().enumerate() {
-            if operand < self.variable_count {
-                self.usage_tracker.add_usage(operand, self.operations.len(), true);
-            }
+            self.program_flow.add_usage(operand, self.operations.len(), Usage::Use);
+            debug_assert!(operand < self.variable_count || self.operands[operand].last_use.is_none());
+            self.operands[operand].last_use.replace(self.operations.len());
             let hint = operation.bitmap_hint(i, self.operands[operand].size);
             let new_hint = hint & self.operands[operand].hint;
             if new_hint != 0 {
+                self.operands[operand].hint = new_hint;
                 self.operands[operand].hint = new_hint;
             }
         }
 
         if let Some(op) = &dest {
             size = self.operands[*op].size;
-            if *op < self.variable_count {
-                self.usage_tracker.add_usage(*op, self.operations.len(), false);
-            }
+            self.program_flow.add_usage(*op, self.operations.len(), Usage::Redefine);
+            debug_assert!(*op < self.variable_count || self.operands[*op].last_use.is_none());
             if let Some(first) = operands.first() {
                 let new_hint = self.operands[*op].hint & self.operands[*first].hint;
                 if new_hint != 0 {
@@ -440,7 +452,7 @@ impl InstructionBuilder {
         } else if let Some(OperationUnit::Operation(instruction)) =  self.operations.last_mut() {
             instruction.dest = Some(dest_index);
             if dest_index < self.variable_count {
-                self.usage_tracker.add_usage(dest_index, self.operations.len() - 1, false);
+                self.program_flow.add_usage(dest_index, self.operations.len() - 1, Usage::Redefine);
             }
         } else {
             unreachable!("An operation was added..");
@@ -452,9 +464,7 @@ impl InstructionBuilder {
         let mut builder_stack = Vec::new();
         let outer_scope_id = self.block_tracker.get_id();
         self.program_flow.add_root(outer_scope_id, 0);
-        self.operations.push(OperationUnit::SyncPush(outer_scope_id));
-        self.operations.push(OperationUnit::EnterBlock(outer_scope_id));
-        self.usage_tracker.enter_scope(outer_scope_id);
+        self.operations.push(OperationUnit::Node(node_flag::SYNC_PUSH, outer_scope_id));
         let mut return_addr_list = Vec::new();
         while let Some(iter) = statement_stack.last_mut() {
             if let Some(val) = iter.next() {
@@ -511,8 +521,6 @@ impl InstructionBuilder {
             self.register_state.allocate_addr(&self.operands[op],
             self.operations.len());
         }
-        self.operations.push(OperationUnit::LeaveBlock(false));
-        self.operations.push(OperationUnit::SyncPop);
 
         self.operations.iter().rev()
             .filter_map(|op| op.operation())
@@ -525,56 +533,67 @@ impl InstructionBuilder {
                }
             });
 
-        self.usage_tracker.leave_scope();
-        self.usage_tracker.finalize(&mut self.operations, self.variable_count);
         let row = self.operations.len();
-        self.program_flow.finalize(&mut self.operations, self.variable_count, row);
+        self.program_flow.finalize(row);
         self.program_flow.print();
+        //self.program_flow.print();
+        /*
         for (index, op) in self.operations.iter().enumerate() {
             println!("{}: {:?}", index, op);
-        }
+        }*/
         self
     }
 
     pub fn compile(mut self) -> Vec<u8> {
-        // Remove last leave_block and syncPop
-        self.operations.truncate(self.operations.len() - 2);
         let mut operation_index_list = Vec::with_capacity(self.operations.len());
 
         for index in 0..self.operations.len() {
             operation_index_list.push(self.register_state.output.len());
-            match std::mem::replace(&mut self.operations[index], OperationUnit::EnterBlock(0)) {
-                OperationUnit::EnterBlock(ref id) => {
-                    self.register_state.enter_block(&self.operands);
-                    let to_free = self.usage_tracker.get_frees(*id);
+            println!("{}-------", index);
+            match std::mem::replace(&mut self.operations[index], OperationUnit::Node(0, 0)) {
+                OperationUnit::Node(flags, node_id) => {
+                    print!("Node ");
+                    if flags & node_flag::SYNC_FIX != 0 {
+                        print!("Sync_fix ");
+                        self.register_state.sync_state(&self.operands);
+                    }
+                    if flags & node_flag::SYNC_LOAD != 0 {
+                        print!("Sync_load ");
+                        self.register_state.load_state(&self.operands);
+                    }
+                    if flags & node_flag::SYNC_POP != 0 {
+                        print!("Sync_pop ");
+                        self.register_state.pop_state();
+                    }
+                    if flags & node_flag::SYNC_UPDATE != 0 {
+                        print!("Sync_update ");
+                        self.register_state.update_state(&self.operands);
+                    }
+                    let operands = self.program_flow.get_initializations(node_id);
+                    print!("size: {}", operands.size_hint().0);
+                    if flags & node_flag::SYNC_PUSH != 0 {
+                        print!(" PUSH");
+                        self.register_state.reserve_variables(operands.size_hint().0);
+                        for operand_id in operands {
+                            let invalid_soon = self.program_flow.variable_invalidations(*operand_id);
+                            let operand = &mut self.operands[*operand_id];
+                            self.register_state.allocate_variable(*operand_id, operand, invalid_soon);
+                        }
+                        self.register_state.push_state(&self.operands);
+                    }
+                    println!();
+                    let to_free = self.program_flow.get_frees(node_id);
                     for &operand in to_free {
                         if !self.register_state.is_free(&self.operands[operand]) {
+                            println!("Free(0) {}", operand);
                             self.register_state.free(&self.operands[operand]);
                         }
                     }
                 },
-                OperationUnit::LeaveBlock(has_next) => {
-                    self.register_state.leave_block(&self.operands, has_next);
-                },
-                OperationUnit::SyncPush(scope) => {
-                    let operands = self.usage_tracker.get_initializations(scope);
-                    self.register_state.reserve_variables(operands.size_hint().0);
-                    for operand_id in operands {
-                        let invalid_soon = self.usage_tracker.variable_invalidations(*operand_id);
-                        let operand = &mut self.operands[*operand_id];
-                        self.register_state.allocate_variable(*operand_id, operand, invalid_soon);
-                    }
-                    self.register_state.push_state(&self.operands);
-                }
-                OperationUnit::SyncLoad => {
-                    self.register_state.load_state(&self.operands);
-                },
-                OperationUnit::SyncPop => {
-                  self.register_state.pop_state();
-                },
                 OperationUnit::Operation(mut operation) => {
+                    println!("Operation {:?}", operation);
                     let mut invalid_now =  operation.invalidations;
-                    let mut invalid_soon = self.usage_tracker.row_invalidations(index);
+                    let mut invalid_soon = self.program_flow.row_invalidations(index);
                     let mut bitmap = 1;
                     let destroyed = operation.operator.destroyed();
                     for (i, id) in operation.operands.iter_mut().enumerate() {
@@ -582,11 +601,11 @@ impl InstructionBuilder {
                             bitmap, i, self.operands[*id].size
                         );
 
-                        let used_after = self.usage_tracker.used_after(*id, index);
+                        let needed = self.program_flow.used_after(i + 1, index);
 
                         // Merge home location with first operand
                         // Needed for moves, a bit ugly.
-                        if used_after == UsedAfter::None && *id >= self.variable_count {
+                        if needed == Needed::None && *id >= self.variable_count {
                             if let Some(dest) = operation.dest {
                                 self.operands[*id].home = self.operands[dest].home;
                             }
@@ -600,7 +619,7 @@ impl InstructionBuilder {
                         let mut allocation_bitmap = self.register_state.allocation_bitmap(&self.operands[*id]);
 
 
-                        let copy_needed = used_after == UsedAfter::ValueNeeded && destroyed & (1 << i) != 0;
+                        let copy_needed = needed == Needed::Value && destroyed & (1 << i) != 0;
                         let invalid_location = allocation_bitmap & bitmap == 0;
                         if copy_needed || invalid_location {
                             let new = self.create_operand(self.operands[*id].size);
@@ -616,7 +635,8 @@ impl InstructionBuilder {
                             }
 
                             allocation_bitmap = location;
-                            if used_after != UsedAfter::ValueNeeded {
+                            if needed != Needed::Value {
+                                println!("Free(1) {}, {}", *id, i);
                                 self.register_state.free(&self.operands[*id]);
                             }
                             *id = new;
@@ -626,7 +646,7 @@ impl InstructionBuilder {
                         // If this operand is going to be freed there is no need to invalidate it.
                         // It cannot be freed until after invalidation is done since otherwise
                         //  they might be overridden while saving needed invalidated registers.
-                        if used_after != UsedAfter::ValueNeeded {
+                        if needed != Needed::Value {
                             invalid_now &= !allocation_bitmap;
                         }
                         bitmap = allocation_bitmap;
@@ -640,23 +660,23 @@ impl InstructionBuilder {
                     if let Some(dest) = operation.dest {
                         let first = *operation.operands.first().unwrap();
                         self.operands[first].merge_into(&self.operands[dest]);
-                        let usage = self.usage_tracker.used_after(dest, index);
-                        if usage == UsedAfter::DestNeeded {
-                            // Make sure this reg does not get freed later
-                            self.usage_tracker.mark_dest(dest, index);
-                        } else if usage != UsedAfter::ValueNeeded {
+                        let usage = self.program_flow.used_after(0, index);
+                        if usage != Needed::Value {
+                            println!("Free(2) {}, dest", dest);
                             self.register_state.free(&self.operands[dest]);
                         }
                     } else if let Some(&first) = operation.operands.first() {
-                        let usage = self.usage_tracker.used_after(first, index);
-                        if usage != UsedAfter::ValueNeeded {
+                        let usage = self.program_flow.used_after(1, index);
+                        if usage != Needed::Value {
+                            println!("Free(3) {}, 0", first);
                             self.register_state.free(&self.operands[first]);
                         }
                     }
-                    for operand in &operation.operands[1..] {
-                        let usage = self.usage_tracker.used_after(*operand, index);
-                        if usage != UsedAfter::ValueNeeded {
+                    for (i, operand) in operation.operands[1..].iter().enumerate() {
+                        let usage = self.program_flow.used_after(i + 1, index);
+                        if usage != Needed::Value {
                             if !self.register_state.is_free(&self.operands[*operand]) {
+                                println!("Free(4) {}, {}", *operand, i);
                                 self.register_state.free(&self.operands[*operand]);
                             }
                         }
