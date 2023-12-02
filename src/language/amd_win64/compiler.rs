@@ -447,8 +447,7 @@ impl InstructionBuilder {
 
         if prev_len ==  self.operations.len() { // Whole expression was only a variable or immediate value.
             let operand = *locations.last().unwrap();
-            let first = self.create_operand(dest_size);
-            self.add_operation(OperationType::Mov, vec![first, operand], Some(dest_index));
+            self.add_operation(OperationType::Mov, vec![operand], Some(dest_index));
         } else if let Some(OperationUnit::Operation(instruction)) =  self.operations.last_mut() {
             instruction.dest = Some(dest_index);
             if dest_index < self.variable_count {
@@ -534,13 +533,14 @@ impl InstructionBuilder {
             });
 
         let row = self.operations.len();
-        self.program_flow.finalize(row);
-        self.program_flow.print();
-        //self.program_flow.print();
-        /*
         for (index, op) in self.operations.iter().enumerate() {
             println!("{}: {:?}", index, op);
-        }*/
+        }
+        self.program_flow.finalize(row, &self.operations, &self.operands);
+        self.program_flow.print();
+        //self.program_flow.print();
+
+
         self
     }
 

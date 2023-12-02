@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use crate::language::amd_win64::instruction::InstructionOperand::Imm;
 use crate::language::types::Type;
 use super::registers::*;
 
@@ -116,15 +117,15 @@ impl OperationType {
     pub fn first_bitmap(&self, size : OperandSize) -> u64 {
         match self {
             OperationType::Div | OperationType::IDiv |
-            OperationType::Mul | OperationType::MovRet => RAX,
+            OperationType::Mul => RAX,
 
             OperationType::IMul if size == OperandSize::BYTE => RAX,
 
             OperationType::IMul | OperationType::Add | OperationType::Sub |
-            OperationType::Mov | OperationType::And | OperationType::Or |
-            OperationType::Xor | OperationType::Cmp  => MEM_GEN_REG,
+            OperationType::And | OperationType::Or | OperationType::Xor |
+            OperationType::Cmp  => MEM_GEN_REG,
 
-            OperationType::Push | OperationType::Pop | OperationType::SetE | OperationType::SetNE |
+            OperationType::Push | OperationType::SetE | OperationType::SetNE |
             OperationType::SetA | OperationType::SetB | OperationType::SetAE |
             OperationType::SetBE | OperationType::SetG | OperationType::SetL |
             OperationType::SetGE | OperationType::SetLE => GEN_REG,
@@ -134,9 +135,11 @@ impl OperationType {
             OperationType::JmpG | OperationType::JmpL | OperationType::JmpGE |
             OperationType::JmpLE | OperationType::JmpNop => IMM64,
 
+            OperationType::Mov | OperationType::MovRet => MEM_GEN_REG | IMM64,
+
             OperationType::Jmp => GEN_REG | IMM64,
 
-            OperationType::Ret => panic!("No first operand")
+            OperationType::Ret | OperationType::Pop  => panic!("No first operand")
         }
     }
 

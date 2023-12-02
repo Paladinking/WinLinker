@@ -1,7 +1,10 @@
-use std::collections::{HashMap, HashSet};
-use std::ops::{BitAnd, Range};
+use std::collections::{HashSet};
+use std::fmt::format;
+use std::ops::{Index, Range};
 use std::ptr;
 use crate::language::amd_win64::compiler::OperationUnit;
+use crate::language::amd_win64::operation::Operand;
+use crate::language::amd_win64::registers;
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub enum Usage {
@@ -40,7 +43,7 @@ impl Node {
 }
 
 pub struct InterferenceGraph {
-    nodes : Vec<>
+
 }
 
 // ADD(new_child): Add top of open as parents to new node, replace with new child
@@ -166,8 +169,9 @@ impl ProgramFlow {
         }
     }
 
-    unsafe fn finalize_internal(&mut self) {
+    unsafe fn finalize_internal(&mut self, operations: &Vec<OperationUnit>, operands: &Vec<Operand>) {
         let mut node_stack = std::mem::take(&mut self.exit_points);
+
         while let Some(node) = node_stack.pop() {
             (*node).live_out = (*node).children.iter().flat_map(
                 |&child| (*child).live_in.iter().cloned()
@@ -180,12 +184,125 @@ impl ProgramFlow {
                 node_stack.extend_from_slice(&(*node).parents);
             }
         }
+
+        struct VirtualRegister {
+            neighbors : HashSet<*mut VirtualRegister>,
+            marked : bool
+        }
+        let operand_count = operands.len();
+        // Add all operands to graph
+        let mut graph = vec![];
+
+        // Add all registers + operands to graph
+        let register_count = registers::GEN_REG_COUNT;
+        graph.resize_with(operand_count + register_count, ||
+            Box::into_raw(Box::new(VirtualRegister {
+                neighbors: HashSet::new(), marked: false
+            }))
+        );
+
+        // Add edges between all registers
+        let mut registers = registers::GEN_REG;
+        while let Some(register) = registers::get_next_register(&mut registers) {
+            (*graph[operand_count + register]).neighbors =
+                (operand_count..(operand_count + register_count)).filter_map(|i|
+                    if i == register {None} else { Some(graph[i]) }
+                ).collect();
+        }
+
+        // Iterate all nodes:
+        for &node in &self.nodes {
+            // TODO: Replace with std::mem::take?
+            let mut live = (*node).live_out.clone();
+
+            /*for &operand in &live {
+                (*graph[operand]).neighbors.extend(
+                    live.iter().filter_map(|&i|
+                        if i != operand {Some(graph[i])} else {None})
+                );
+            }*/
+
+            for i in (*node).duration.clone().rev() {
+                let operation = if let OperationUnit::Operation(operation) = &operations[i] {
+                    operation
+                } else {
+                    continue;
+                };
+                // Just for now.
+                debug_assert!(operation.operands.len() <= 2);
+                println!("{:?}", operation.operator);
+                if let Some(dest) = operation.dest {
+                    live.remove(&dest);
+                    let dest_bitmap = operation.operator.first_bitmap(operands[dest].size);
+
+                    // Get all general purpose registers dest cannot be in.
+                    let mut bitmap = (!dest_bitmap) & registers::GEN_REG;
+                    while let Some(index) = registers::get_next_register(&mut bitmap) {
+                        println!("Dest {}, {}", dest, registers::register_index_to_string(index));
+                        (*graph[dest]).neighbors.insert(graph[index + operand_count]);
+                        (*graph[index + operand_count]).neighbors.insert(graph[dest]);
+                    }
+                }
+                // Add edges between live and invalidated registers.
+                let mut bitmap = operation.invalidations & registers::GEN_REG;
+                while let Some(index) = registers::get_next_register(&mut bitmap) {
+                    println!("Invalid {}, {}", index, registers::register_index_to_string(index));
+                    for &node in &live {
+                        (*graph[node]).neighbors.insert(graph[index]);
+                        (*graph[index]).neighbors.insert(graph[node]);
+                    }
+                }
+                if let Some(&first) = operation.operands.first() {
+                    if live.insert(first) {
+                        let first_bitmap = operation.operator.first_bitmap(operands[first].size);
+                        // Get all general purpose registers first cannot be in.
+                        let mut bitmap = (!first_bitmap) & registers::GEN_REG;
+                        while let Some(index) = registers::get_next_register(&mut bitmap) {
+                            println!("First {}, {}", first, registers::register_index_to_string(index));
+                            (*graph[first]).neighbors.insert(graph[index + operand_count]);
+                            (*graph[index + operand_count]).neighbors.insert(graph[first]);
+                        }
+                    }
+                }
+                if let Some(&second) = operation.operands.get(1) {
+                    let second_bitmap = operation.operator.second_bitmap(operands[second].size);
+                    let mut bitmap = (!second_bitmap) & registers::GEN_REG;
+                    while let Some(index) = registers::get_next_register(&mut bitmap) {
+                        (*graph[second]).neighbors.insert(graph[index + operand_count]);
+                        (*graph[index + operand_count]).neighbors.insert(graph[second]);
+                    }
+                    live.insert(second);
+                }
+                for &operand in &operation.operands {
+                    for &i in live.iter().filter(|&index| *index != operand) {
+                        (*graph[i]).neighbors.insert(graph[operand]);
+                        (*graph[operand]).neighbors.insert(graph[i]);
+                    }
+                }
+            }
+        }
+        println!("Count: {}, {:?}, {:?}", operand_count, graph[0], graph[1]);
+
+        for (i, &val) in graph.iter().enumerate() {
+            let name = if i < operand_count { format!("{}", i )} else {
+                registers::register_index_to_string(i - operand_count).to_owned()
+            };
+            let neighbors = (*val).neighbors.iter().map(|&val| {
+                let i = graph.iter().enumerate().find_map(|(i, &v)| if (val == v) { Some(i) } else { None }).unwrap();
+                if i < operand_count { format!("{}", i) } else {
+                    registers::register_index_to_string(i - operand_count).to_owned()
+                }
+            }).collect::<Vec<_>>();
+            println!("{}, {:?}", name, neighbors);
+        }
+
+
     }
 
-    pub fn finalize(&mut self, row: usize) {
+    pub fn finalize(&mut self, row: usize, operations: &Vec<OperationUnit>, operands: &Vec<Operand>) {
         unsafe {
             (*self.current_node).duration.end = row;
-            self.finalize_internal();
+            self.finalize_internal(operations, operands);
         }
     }
 
@@ -207,7 +324,6 @@ impl ProgramFlow {
                 println!("\tLive_out: {:?}", (*node).live_out);
                 println!("\tGen: {:?}", (*node).gen);
                 println!("\tKill: {:?}", (*node).kill);
-
             }
         }
     }

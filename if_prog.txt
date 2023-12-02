@@ -1,3 +1,11 @@
+
+u32 a;
+start {
+    a = 10;
+
+    return a + 20;
+} end
+
 u32 a;
 u32 b;
 start {

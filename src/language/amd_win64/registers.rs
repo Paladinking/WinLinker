@@ -42,6 +42,7 @@ pub const VOL_GEN_REG : u64 = RAX | RCX | RDX | R8 | R9 | R10 | R11;
 pub const NON_VOL_GEN_REG : u64 = RBX | RBP | RDI | RSI | R12 | R13 | R14 | R15;
 pub const GEN_REG : u64 = VOL_GEN_REG | NON_VOL_GEN_REG;
 pub const MEM_GEN_REG : u64 = GEN_REG | MEM;
+pub const GEN_REG_COUNT : usize = GEN_REG.count_ones() as usize;
 
 pub mod encoding {
     pub const RAX : u8 = 0b0000;
@@ -153,6 +154,38 @@ impl MemoryAllocation {
         }
     }
 }
+
+// Returns the index in the register list of the highest priority register in bitmap,
+//  or None if the bitmap has no registers in it.
+// Removes the given register from the bitmap.
+pub fn get_next_register(bitmap : &mut u64) -> Option<usize> {
+    let map = *bitmap & (u64::MAX << (63 - (*bitmap | 1).leading_zeros()));
+    *bitmap &= !map;
+    return Some(match map {
+        RCX => 0, RDX => 1, RAX => 2,
+        R8 => 3, R9 => 4, R10 => 5,
+        R11 => 6, RBX => 7, RBP => 8,
+        RDI => 9, RSI => 10, R12 => 11,
+        R13 => 12, R14 => 13, R15 => 14,
+        0 => {return None;}
+        _ => {
+            panic!("Bad bitmap")
+        }
+    });
+}
+
+pub fn register_index_to_string(index: usize) ->  &'static str {
+    return register_string(register_index_to_bitmap(index));
+}
+pub fn register_index_to_bitmap(index: usize) -> u64 {
+    return match index {
+        0 => RCX, 1 => RDX, 2 => RAX, 3 => R8, 4 => R9,
+        5 => R10, 6 => R11, 7 => RBX, 8 => RBP, 9 => RDI,
+        10 => RSI, 11 => R12, 12 => R13, 13 => R14, 14 => R15,
+        _ => panic!("Invalid register")
+    };
+}
+
 
 impl RegisterState {
 
@@ -462,11 +495,13 @@ impl RegisterState {
         for bitmap in [operand.hint & !invalid_soon, operand.hint, !invalid_soon, GEN_REG] {
             if let Some(location) = Self::get_register(self.free_gen & !self.variable_map & bitmap) {
                 let allocation = MemoryAllocation::Register(location, operand.size);
+                println!("Allocated {}, {:?}", id, self.allocation_string(&allocation));
                 self.variable_map |= self.registers[location].bitmap;
                 self.saved_variables.last_mut().unwrap().insert(id, (allocation, true));
                 if operand.hint & self.registers[location].bitmap != 0 {
                     operand.hint &= self.registers[location].bitmap;
                 }
+
                 return;
             }
         }
@@ -486,10 +521,12 @@ impl RegisterState {
         for index in 0..size {
             let (id, ref allocation) = self.variables[index];
             if !self.is_free(&operands[id]) {
+                println!("Push !free {}, {}", id, self.allocation_string(&self.allocations[operands[id].allocation.get()].clone()));
                 self.saved_variables.last_mut().unwrap().insert(
                     id, (self.allocations[operands[id].allocation.get()].clone(), false)
                 );
             } else {
+                println!("Push free {}, {}", id, self.allocation_string(allocation));
                 self.saved_variables.last_mut().unwrap().insert(
                     id, (allocation.clone(), true)
                 );
@@ -506,11 +543,16 @@ impl RegisterState {
             *is_free = self.is_free(&operands[*id]);
         }
         self.saved_variables.push(saved);
-        self.load_state(operands);
     }
 
     pub fn load_state(&mut self, operands : &Vec<Operand>) {
+
         let to_restore = self.saved_variables.pop().unwrap();
+        let pmap = to_restore.iter().map(|(k, v)|
+            (k, (self.allocation_string(&v.0), v.1))
+        ).collect::<HashMap<_,_>>();
+
+        println!("{:?}", pmap);
         for (id, (allocation, _)) in &to_restore {
             let cur_allocation = operands[*id].allocation.get();
             if !self.is_free(&operands[*id]) && self.allocations[cur_allocation].ne(allocation) {
@@ -524,7 +566,9 @@ impl RegisterState {
                     self.free_allocation(index, false);
                 }
             } else {
+                let before = self.allocations[index].clone();
                 self.allocations[index] = allocation.clone();
+                println!("Var {}, before: {}, after: {}", id, self.allocation_string(&before), self.allocation_string(&self.allocations[index]));
                 if let MemoryAllocation::Register(reg, _) = &self.allocations[index] {
                     self.registers[*reg].operand.replace(index);
                 }
